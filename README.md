@@ -10,16 +10,20 @@ A steel pan instrument running CircuitPython. Designed for the Raspberry Pi Pico
 - **JSON-driven configuration** — `pan_layout.json` defines note layout, pin assignments, mux wiring, and audio settings
 - **Tenor pan range** — C4 to E6, 29 notes across 3 concentric rings (outer/central/inner)
 - **Four input modes** — digital buttons, capacitive touch, mux-based touch with analog velocity, or full analog scan (29 pads, 9 pins)
-- **Board-agnostic** — pin names in JSON config, works on Pico, Pico 2, Pico W, ESP32-S3, Arduino RP2040
+- **Board auto-detection** — detects Pico, Pico 2, Pico W, ESP32-S3, Arduino RP2040 at startup and applies sensible pin defaults; JSON config overrides as needed
 - **Automatic install** — `install.py` converts samples and deploys to the Pico
 
 ## Hardware
 
 - Raspberry Pi Pico / Pico 2 (or any CircuitPython board)
-- 4W speaker via class-D amplifier (e.g. PAM8403) on GP18
-- 29 FSR (Force Sensitive Resistor) touch pads
+- Waveshare Pico-Audio HAT (I2S DAC, PCM5101A) — plugs onto Pico
+- ADS1115 I2C ADC breakout (16-bit, reads mux analog signals)
 - 2x HW-178 multiplexer modules (CD74HC4067 16-channel analog mux breakout)
+- 29 FSR (Force Sensitive Resistor) touch pads
+- 4W speaker (4-8 ohm) — connects to Pico-Audio speaker header
 - See [WIRING.md](WIRING.md) for the full wiring diagram
+
+Alternative: use PWM audio (no HAT needed) with an external amplifier — see WIRING.md.
 
 ## Quick Start
 
@@ -40,11 +44,39 @@ python install.py /Volumes/CIRCUITPY
 
 This converts the panipuri WAV files (44100 Hz stereo) to Pico-friendly format (22050 Hz mono), then copies `code.py`, `pan_layout.json`, and `sounds/` to the drive.
 
+### 2b. Install CircuitPython Libraries (for I2S + ADS1115)
+
+If using the default I2S audio configuration with ADS1115, install the required libraries:
+
+```bash
+# Option A: using circup (recommended)
+pip install circup
+circup install adafruit_ads1x15 adafruit_bus_device
+
+# Option B: manual — download the Adafruit CircuitPython Bundle from
+# https://circuitpython.org/libraries and copy these to CIRCUITPY/lib/:
+#   adafruit_ads1x15/
+#   adafruit_bus_device/
+```
+
 The Pico restarts automatically and runs the demo.
 
 ### 3. Wire up pads
 
 Connect touch pads and the multiplexer as described in [WIRING.md](WIRING.md), then edit `pan_layout.json` to map GPIO pins to notes.
+
+## Board Auto-Detection
+
+On startup, `code.py` detects the board type and applies sensible default pin assignments. Any settings in `pan_layout.json` override the defaults, so you only need to configure what differs from the standard setup.
+
+| Board | Detected as | I2S Pins | I2C Pins | Mux Select |
+|-------|-------------|----------|----------|------------|
+| Pico / Pico 2 | `raspberry_pi_pico` | GP26/27/28 | GP4/GP5 | GP10-13 |
+| Pico W | `raspberry_pi_pico_w` | GP26/27/28 | GP4/GP5 | GP10-13 |
+| ESP32-S3 | `esp32s3` | IO4/5/6 | native ADC | IO10-13 |
+| Arduino Nano RP2040 | `arduino_nano_rp2040_connect` | D2/3/4 | A4/A5 | D5-8 |
+
+For most Pico setups, the JSON `"hardware"` section only needs `input_mode` and `pads` — pin assignments are automatic.
 
 ## Configuration
 
@@ -57,19 +89,26 @@ All configuration lives in `pan_layout.json`. The `"notes"` section defines the 
     {"name": "D", "octave": 4, "ring": "outer", "idx": "O4"}
   ],
   "hardware": {
-    "audio_pin": "GP18",
-    "input_mode": "mux_touch",
+    "audio_out": "i2s",
+    "i2s": {
+      "bit_clock": "GP27",
+      "word_select": "GP28",
+      "data": "GP26"
+    },
+    "input_mode": "mux_scan",
     "max_voices": 8,
     "sample_rate": 22050,
+    "adc": {"type": "i2c", "sda": "GP4", "scl": "GP5"},
     "mux": {
-      "analog_pin": "GP26",
-      "select_pins": ["GP10", "GP11", "GP12", "GP13"]
+      "select_pins": ["GP10", "GP11", "GP12", "GP13"],
+      "mux_a": {"enable_pin": "GP14"},
+      "mux_b": {"enable_pin": "GP15"},
+      "threshold": 3000
     },
-    "pins": {
-      "GP0": {"note": "C4", "mux_channel": 0},
-      "GP1": {"note": "D4", "mux_channel": 1},
-      "GP2": {"note": "E4", "mux_channel": 2}
-    }
+    "pads": [
+      {"note": "C4", "mux": "a", "channel": 0},
+      {"note": "C#4", "mux": "a", "channel": 1}
+    ]
   }
 }
 ```
@@ -83,14 +122,17 @@ All configuration lives in `pan_layout.json`. The `"notes"` section defines the 
 | Button | `"button"` | Digital GPIO pins with internal pull-up, active low. Fixed velocity. |
 | Touch | `"touch"` | Capacitive touch via `touchio`. Fixed velocity. |
 
-**Mux scan mode** — full 29-pad tenor pan, velocity-sensitive, only 9 GPIO pins:
+**Mux scan mode** — full 29-pad tenor pan, velocity-sensitive, I2S audio via Pico-Audio HAT:
 
 ```json
 "input_mode": "mux_scan",
+"audio_out": "i2s",
+"i2s": {"bit_clock": "GP27", "word_select": "GP28", "data": "GP26"},
+"adc": {"type": "i2c", "sda": "GP4", "scl": "GP5"},
 "mux": {
   "select_pins": ["GP10", "GP11", "GP12", "GP13"],
-  "mux_a": {"analog_pin": "GP26", "enable_pin": "GP14"},
-  "mux_b": {"analog_pin": "GP27", "enable_pin": "GP15"},
+  "mux_a": {"enable_pin": "GP14"},
+  "mux_b": {"enable_pin": "GP15"},
   "threshold": 3000,
   "settle_us": 100
 },
@@ -129,7 +171,10 @@ All configuration lives in `pan_layout.json`. The `"notes"` section defines the 
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `audio_pin` | `"GP18"` | PWM audio output pin |
+| `audio_out` | `"i2s"` | Audio backend: `"i2s"` or `"pwm"` |
+| `i2s` | see below | I2S pin config (when `audio_out` is `"i2s"`) |
+| `audio_pin` | `"GP18"` | PWM audio output pin (when `audio_out` is `"pwm"`) |
+| `adc` | `null` | ADC config: `{"type": "i2c", "sda": "GP4", "scl": "GP5"}` for ADS1115 |
 | `max_voices` | `8` | Simultaneous polyphony voices |
 | `sample_rate` | `22050` | Audio sample rate in Hz |
 | `sounds_dir` | `"sounds"` | Directory containing WAV files |
@@ -175,7 +220,7 @@ The 29 tenor pan notes are arranged across 3 concentric rings:
 
 1. On boot, `code.py` reads `pan_layout.json` to load the note layout and hardware config
 2. WAV files from `sounds/` are loaded via `audiocore.WaveFile` (streamed from flash)
-3. An `audiomixer.Mixer` runs continuously on `audiopwmio.PWMAudioOut`
+3. An `audiomixer.Mixer` runs continuously on `audiobusio.I2SOut` (or `audiopwmio.PWMAudioOut` for PWM mode)
 4. The main loop scans input pins at 50 Hz
 5. On touch: the mux reads the analog voltage, maps it to velocity, and triggers `note_on`
 6. `note_on` allocates a mixer voice (round-robin), sets volume from velocity (`(vel/127)^0.7`), and plays the WAV
@@ -190,7 +235,7 @@ If WAV files or `audiomixer` are unavailable, the code falls back to simple PWM 
 | `code.py` | Main CircuitPython program (copy to Pico as `code.py`) |
 | `pan_layout.json` | Note layout + hardware configuration |
 | `install.py` | Sample converter and Pico installer |
-| `WIRING.md` | Wiring diagram for mux_touch mode |
+| `WIRING.md` | Wiring diagram (I2S + ADS1115 + dual mux) |
 | `sounds/` | WAV samples (generated by `install.py`) |
 
 ## Credits

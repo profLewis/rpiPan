@@ -6,11 +6,12 @@ polyphonic mixing via audiomixer, responds to touch or button inputs.
 Supports velocity-sensitive playback via analog multiplexer readings.
 
 Hardware:
-    - Raspberry Pi Pico (RP2040)
-    - Audio output on GP18 (configurable PWM audio)
-    - Speaker/amplifier connected to audio pin
+    - Raspberry Pi Pico / Pico 2 (or any CircuitPython board)
+    - Waveshare Pico-Audio HAT (I2S DAC on GP26/GP27/GP28) — default
+      or PWM audio on any GPIO pin (fallback)
+    - ADS1115 I2C ADC (when I2S audio occupies the ADC pins)
+    - 2x HW-178 (CD74HC4067) analog multiplexers for 29 FSR pads
     - Touch pads or buttons on configurable GPIO pins
-    - Optional: analog multiplexer (e.g. CD74HC4067) for velocity sensing
 
 Input modes:
     - "button"    : digital GPIO pins, fixed velocity
@@ -18,12 +19,18 @@ Input modes:
     - "mux_touch" : digital trigger + analog velocity via multiplexer
     - "mux_scan"  : pure analog scanning (2 muxes, no digital pins needed)
 
+Audio output:
+    - "i2s"       : I2S via audiobusio.I2SOut (Waveshare Pico-Audio, etc.)
+    - "pwm"       : PWM via audiopwmio.PWMAudioOut (simple speaker/amp)
+
 Setup:
     1. Install CircuitPython on the Pico
     2. Copy this file as code.py to CIRCUITPY drive
     3. Copy pan_layout.json to CIRCUITPY drive
     4. Copy sounds/ directory with WAV files to CIRCUITPY drive
        (WAV files: 16-bit signed, mono, 22050 Hz — use install.py to convert)
+    5. If using I2S + ADS1115: install adafruit_ads1x15 and
+       adafruit_bus_device libraries to CIRCUITPY/lib/
 
 The sounds/ directory should contain files named like the panipuri project:
     C4.wav, Cs4.wav, D4.wav, Ds4.wav, E4.wav, F4.wav, Fs4.wav, ...
@@ -34,6 +41,110 @@ import json
 import time
 import board
 import digitalio
+
+
+# ---------------------------------------------------------------------------
+# Board detection
+# ---------------------------------------------------------------------------
+
+def detect_board():
+    """Detect the board type and return a name string.
+
+    Uses board.board_id (CircuitPython 7+) or falls back to checking
+    for known pin names.
+    """
+    board_id = getattr(board, "board_id", "")
+    if board_id:
+        return board_id
+
+    # Fallback: probe for distinctive pins
+    if hasattr(board, "GP25"):  # Pico onboard LED
+        if hasattr(board, "CYW43_PIN_WL_GPIO"):
+            return "raspberry_pi_pico_w"
+        return "raspberry_pi_pico"
+    if hasattr(board, "IO0"):
+        return "esp32s3"
+    if hasattr(board, "D13") and hasattr(board, "A0"):
+        return "arduino_nano_rp2040_connect"
+    return "unknown"
+
+
+# Default hardware configs per board type.
+# These are used when pan_layout.json does not contain a "hardware" section,
+# or as a base that the JSON config overrides.
+BOARD_DEFAULTS = {
+    "raspberry_pi_pico": {
+        "audio_out": "i2s",
+        "i2s": {"bit_clock": "GP27", "word_select": "GP28", "data": "GP26"},
+        "adc": {"type": "i2c", "sda": "GP4", "scl": "GP5"},
+        "led_pin": "LED",
+        "mux": {
+            "select_pins": ["GP10", "GP11", "GP12", "GP13"],
+            "mux_a": {"enable_pin": "GP14"},
+            "mux_b": {"enable_pin": "GP15"},
+        },
+    },
+    "raspberry_pi_pico2": {
+        "audio_out": "i2s",
+        "i2s": {"bit_clock": "GP27", "word_select": "GP28", "data": "GP26"},
+        "adc": {"type": "i2c", "sda": "GP4", "scl": "GP5"},
+        "led_pin": "LED",
+        "mux": {
+            "select_pins": ["GP10", "GP11", "GP12", "GP13"],
+            "mux_a": {"enable_pin": "GP14"},
+            "mux_b": {"enable_pin": "GP15"},
+        },
+    },
+    "raspberry_pi_pico_w": {
+        "audio_out": "i2s",
+        "i2s": {"bit_clock": "GP27", "word_select": "GP28", "data": "GP26"},
+        "adc": {"type": "i2c", "sda": "GP4", "scl": "GP5"},
+        "led_pin": "LED",
+        "mux": {
+            "select_pins": ["GP10", "GP11", "GP12", "GP13"],
+            "mux_a": {"enable_pin": "GP14"},
+            "mux_b": {"enable_pin": "GP15"},
+        },
+    },
+    "esp32s3": {
+        "audio_out": "i2s",
+        "i2s": {"bit_clock": "IO5", "word_select": "IO6", "data": "IO4"},
+        "adc": {"type": "native"},
+        "led_pin": "IO48",
+        "mux": {
+            "select_pins": ["IO10", "IO11", "IO12", "IO13"],
+            "mux_a": {"analog_pin": "IO1", "enable_pin": "IO14"},
+            "mux_b": {"analog_pin": "IO2", "enable_pin": "IO15"},
+        },
+    },
+    "arduino_nano_rp2040_connect": {
+        "audio_out": "i2s",
+        "i2s": {"bit_clock": "D3", "word_select": "D4", "data": "D2"},
+        "adc": {"type": "i2c", "sda": "A4", "scl": "A5"},
+        "led_pin": "D13",
+        "mux": {
+            "select_pins": ["D5", "D6", "D7", "D8"],
+            "mux_a": {"enable_pin": "D9"},
+            "mux_b": {"enable_pin": "D10"},
+        },
+    },
+}
+
+
+def get_board_defaults(board_id):
+    """Get default hardware config for the detected board.
+
+    Tries exact match first, then prefix match (e.g. 'raspberry_pi_pico2'
+    matches 'raspberry_pi_pico' defaults).
+    """
+    if board_id in BOARD_DEFAULTS:
+        return BOARD_DEFAULTS[board_id]
+    # Prefix match: "raspberry_pi_pico2" -> "raspberry_pi_pico"
+    for key in BOARD_DEFAULTS:
+        if board_id.startswith(key):
+            return BOARD_DEFAULTS[key]
+    # Default to Pico config
+    return BOARD_DEFAULTS.get("raspberry_pi_pico", {})
 
 # ---------------------------------------------------------------------------
 # Note/frequency utilities
@@ -128,23 +239,36 @@ class WavPlayer:
     Loads WAV files from sounds/ directory and plays them through
     an audiomixer.Mixer with round-robin voice allocation, allowing
     multiple notes to sound simultaneously.
+
+    Supports two audio backends:
+        - I2S (audiobusio.I2SOut) for DAC boards like Waveshare Pico-Audio
+        - PWM (audiopwmio.PWMAudioOut) for direct speaker/amp connection
     """
 
-    def __init__(self, audio_pin="GP18", max_voices=8,
-                 sample_rate=22050, sounds_dir="sounds"):
-        import audiopwmio
+    def __init__(self, audio_out="pwm", audio_pin="GP18", i2s_config=None,
+                 max_voices=8, sample_rate=22050, sounds_dir="sounds"):
         import audiomixer
 
         self.sounds_dir = sounds_dir
         self.max_voices = max_voices
         self.sample_rate = sample_rate
 
-        # Set up PWM audio output
-        pin = getattr(board, audio_pin, None)
-        if pin is None:
-            raise ValueError("Audio pin {} not found".format(audio_pin))
-
-        self.audio = audiopwmio.PWMAudioOut(pin)
+        # Set up audio output
+        if audio_out == "i2s":
+            import audiobusio
+            cfg = i2s_config or {}
+            bc_pin = getattr(board, cfg.get("bit_clock", "GP27"), None)
+            ws_pin = getattr(board, cfg.get("word_select", "GP28"), None)
+            d_pin = getattr(board, cfg.get("data", "GP26"), None)
+            if not all([bc_pin, ws_pin, d_pin]):
+                raise ValueError("I2S pin(s) not found: {}".format(cfg))
+            self.audio = audiobusio.I2SOut(bc_pin, ws_pin, d_pin)
+        else:
+            import audiopwmio
+            pin = getattr(board, audio_pin, None)
+            if pin is None:
+                raise ValueError("Audio pin {} not found".format(audio_pin))
+            self.audio = audiopwmio.PWMAudioOut(pin)
 
         # Create mixer with multiple voices
         self.mixer = audiomixer.Mixer(
@@ -333,6 +457,84 @@ class TonePlayer:
 
 
 # ---------------------------------------------------------------------------
+# ADC helpers
+# ---------------------------------------------------------------------------
+
+def _create_i2c_adc_channel(adc_config, channel_num):
+    """Create an ADS1115 I2C ADC channel.
+
+    Returns an object with a .value property (0-65535), matching
+    the analogio.AnalogIn interface. Returns None on failure.
+    """
+    try:
+        import busio
+        import adafruit_ads1x15.ads1115 as ADS
+        from adafruit_ads1x15.analog_in import AnalogIn as ADS_AnalogIn
+    except ImportError:
+        print("ERROR: adafruit_ads1x15 library not installed")
+        print("  Install: circup install adafruit_ads1x15")
+        print("  Or copy adafruit_ads1x15/ and adafruit_bus_device/")
+        print("  from the Adafruit CircuitPython Bundle to CIRCUITPY/lib/")
+        return None
+
+    sda_name = adc_config.get("sda", "GP4")
+    scl_name = adc_config.get("scl", "GP5")
+    sda = getattr(board, sda_name, None)
+    scl = getattr(board, scl_name, None)
+    if not sda or not scl:
+        print("ERROR: I2C pins not found: SDA={}, SCL={}".format(sda_name, scl_name))
+        return None
+
+    channels = [ADS.P0, ADS.P1, ADS.P2, ADS.P3]
+    try:
+        i2c = busio.I2C(scl, sda)
+        ads = ADS.ADS1115(i2c)
+        ads.data_rate = 860  # max speed for lowest latency
+        return ADS_AnalogIn(ads, channels[channel_num])
+    except Exception as e:
+        print("ERROR: ADS1115 init failed: {}".format(e))
+        return None
+
+
+def _create_i2c_adc_channels(adc_config, count=2):
+    """Create multiple ADS1115 channels sharing one I2C bus.
+
+    Returns a list of AnalogIn objects (or None entries on failure).
+    """
+    try:
+        import busio
+        import adafruit_ads1x15.ads1115 as ADS
+        from adafruit_ads1x15.analog_in import AnalogIn as ADS_AnalogIn
+    except ImportError:
+        print("ERROR: adafruit_ads1x15 library not installed")
+        print("  Install: circup install adafruit_ads1x15")
+        print("  Or copy adafruit_ads1x15/ and adafruit_bus_device/")
+        print("  from the Adafruit CircuitPython Bundle to CIRCUITPY/lib/")
+        return [None] * count
+
+    sda_name = adc_config.get("sda", "GP4")
+    scl_name = adc_config.get("scl", "GP5")
+    sda = getattr(board, sda_name, None)
+    scl = getattr(board, scl_name, None)
+    if not sda or not scl:
+        print("ERROR: I2C pins not found: SDA={}, SCL={}".format(sda_name, scl_name))
+        return [None] * count
+
+    channel_pins = [ADS.P0, ADS.P1, ADS.P2, ADS.P3]
+    try:
+        i2c = busio.I2C(scl, sda)
+        ads = ADS.ADS1115(i2c)
+        ads.data_rate = 860  # max speed for lowest latency
+        result = []
+        for i in range(count):
+            result.append(ADS_AnalogIn(ads, channel_pins[i]))
+        return result
+    except Exception as e:
+        print("ERROR: ADS1115 init failed: {}".format(e))
+        return [None] * count
+
+
+# ---------------------------------------------------------------------------
 # Input handlers
 # ---------------------------------------------------------------------------
 
@@ -459,9 +661,11 @@ class MuxTouchInput:
     """Digital touch trigger + analog velocity via multiplexer.
 
     Each pad has a digital GPIO pin for touch detection and a channel
-    on an analog multiplexer (e.g. CD74HC4067) for reading strike
-    intensity. The mux select pins choose which channel to read;
+    on an analog multiplexer (e.g. HW-178 / CD74HC4067) for reading
+    strike intensity. The mux select pins choose which channel to read;
     the analog pin returns a 0-3.3V signal proportional to force.
+
+    Supports native ADC (analogio) or external I2C ADC (ADS1115).
 
     Config in pan_layout.json:
         "hardware": {
@@ -477,19 +681,25 @@ class MuxTouchInput:
         }
     """
 
-    def __init__(self, pin_map, notes, mux_config):
-        import analogio
-
+    def __init__(self, pin_map, notes, mux_config, adc_config=None):
         self.pads = []
         by_name, by_idx, by_midi = build_note_lookup(notes)
 
-        # Set up mux analog input
-        adc_pin_name = mux_config.get("analog_pin", "GP26")
-        adc_pin = getattr(board, adc_pin_name, None)
-        if adc_pin is None:
-            print("ERROR: ADC pin {} not found".format(adc_pin_name))
-            return
-        self.adc = analogio.AnalogIn(adc_pin)
+        # Set up ADC — external I2C (ADS1115) or native (analogio)
+        adc_type = adc_config.get("type", "native") if adc_config else "native"
+        if adc_type == "i2c":
+            self.adc = _create_i2c_adc_channel(adc_config, 0)
+            if self.adc:
+                print("Mux ADC: ADS1115 channel A0 via I2C")
+        else:
+            import analogio
+            adc_pin_name = mux_config.get("analog_pin", "GP26")
+            adc_pin = getattr(board, adc_pin_name, None)
+            if adc_pin is None:
+                print("ERROR: ADC pin {} not found".format(adc_pin_name))
+                self.adc = None
+                return
+            self.adc = analogio.AnalogIn(adc_pin)
 
         # Set up mux select pins as digital outputs
         self.select_pins = []
@@ -504,9 +714,7 @@ class MuxTouchInput:
             self.select_pins.append(dio)
 
         self.num_select = len(self.select_pins)
-        print("Mux: {} on {}, {} select pins".format(
-            adc_pin_name, ", ".join(mux_config.get("select_pins", [])),
-            self.num_select))
+        print("Mux: {} select pins".format(self.num_select))
 
         # Set up per-pad digital trigger + mux channel
         for pin_name, pad_cfg in pin_map.items():
@@ -591,43 +799,37 @@ class MuxTouchInput:
 class MuxScanInput:
     """Pure analog scanning via dual multiplexers — no digital pins needed.
 
-    Scans all pads through 2x CD74HC4067 muxes sharing select pins.
-    Each mux has its own ADC pin and enable pin. Touch detection uses
-    a configurable voltage threshold; strike intensity above the
-    threshold maps to velocity.
+    Scans all pads through 2x HW-178 (CD74HC4067) muxes sharing select
+    pins. Each mux has its own enable pin. Touch detection uses a
+    configurable voltage threshold; strike intensity above the threshold
+    maps to velocity.
 
-    This mode supports up to 32 pads (16 per mux) using only 9 Pico
-    GPIO pins total, making it ideal for a full 29-note tenor pan.
+    ADC input can be either:
+        - Native analogio (GP26/GP27) when those pins are free
+        - External ADS1115 via I2C (when I2S audio occupies the ADC pins)
 
-    Pico pin usage:
-        GP10-GP13 : mux select S0-S3 (shared, 4 pins)
-        GP26      : ADC for mux A (channels 0-15)
-        GP27      : ADC for mux B (channels 0-15)
-        GP14      : mux A enable (active low)
-        GP15      : mux B enable (active low)
-        GP18      : audio output
+    This mode supports up to 32 pads (16 per mux) using only 8 Pico
+    GPIO pins total (+ I2C for ADC), ideal for a full 29-note tenor pan.
 
     Config in pan_layout.json:
         "hardware": {
             "input_mode": "mux_scan",
+            "adc": {"type": "i2c", "sda": "GP4", "scl": "GP5"},
             "mux": {
                 "select_pins": ["GP10", "GP11", "GP12", "GP13"],
-                "mux_a": {"analog_pin": "GP26", "enable_pin": "GP14"},
-                "mux_b": {"analog_pin": "GP27", "enable_pin": "GP15"},
+                "mux_a": {"enable_pin": "GP14"},
+                "mux_b": {"enable_pin": "GP15"},
                 "threshold": 3000,
                 "settle_us": 100
             },
             "pads": [
                 {"note": "C4", "mux": "a", "channel": 0},
-                {"note": "D4", "mux": "a", "channel": 1},
                 ...
             ]
         }
     """
 
-    def __init__(self, notes, mux_config, pads_config):
-        import analogio
-
+    def __init__(self, notes, mux_config, pads_config, adc_config=None):
         self.pads = []
         by_name, by_idx, by_midi = build_note_lookup(notes)
 
@@ -649,36 +851,45 @@ class MuxScanInput:
             self.select_pins.append(dio)
         self.num_select = len(self.select_pins)
 
-        # Set up mux A
+        # Set up ADC — external I2C (ADS1115) or native (analogio)
         mux_a_cfg = mux_config.get("mux_a", {})
+        mux_b_cfg = mux_config.get("mux_b", {})
         self.adc_a = None
+        self.adc_b = None
+
+        adc_type = adc_config.get("type", "native") if adc_config else "native"
+        if adc_type == "i2c":
+            adcs = _create_i2c_adc_channels(adc_config, count=2)
+            self.adc_a = adcs[0]
+            self.adc_b = adcs[1]
+            print("Mux ADC: ADS1115 A0=mux_a, A1=mux_b via I2C")
+        else:
+            import analogio
+            a_pin = getattr(board, mux_a_cfg.get("analog_pin", "GP26"), None)
+            if a_pin:
+                self.adc_a = analogio.AnalogIn(a_pin)
+            b_pin = getattr(board, mux_b_cfg.get("analog_pin", "GP27"), None)
+            if b_pin:
+                self.adc_b = analogio.AnalogIn(b_pin)
+
+        # Set up mux A enable
         self.en_a = None
-        a_pin = getattr(board, mux_a_cfg.get("analog_pin", "GP26"), None)
-        if a_pin:
-            self.adc_a = analogio.AnalogIn(a_pin)
         a_en = getattr(board, mux_a_cfg.get("enable_pin", "GP14"), None)
         if a_en:
             self.en_a = digitalio.DigitalInOut(a_en)
             self.en_a.direction = digitalio.Direction.OUTPUT
             self.en_a.value = True  # disabled (active low)
 
-        # Set up mux B
-        mux_b_cfg = mux_config.get("mux_b", {})
-        self.adc_b = None
+        # Set up mux B enable
         self.en_b = None
-        b_pin = getattr(board, mux_b_cfg.get("analog_pin", "GP27"), None)
-        if b_pin:
-            self.adc_b = analogio.AnalogIn(b_pin)
         b_en = getattr(board, mux_b_cfg.get("enable_pin", "GP15"), None)
         if b_en:
             self.en_b = digitalio.DigitalInOut(b_en)
             self.en_b.direction = digitalio.Direction.OUTPUT
             self.en_b.value = True  # disabled
 
-        mux_a_name = mux_a_cfg.get("analog_pin", "GP26")
-        mux_b_name = mux_b_cfg.get("analog_pin", "GP27")
-        print("Mux scan: A={}, B={}, threshold={}, settle={}us".format(
-            mux_a_name, mux_b_name, self.threshold, self.settle_us))
+        print("Mux scan: threshold={}, settle={}us, adc={}".format(
+            self.threshold, self.settle_us, adc_type))
 
         # Build pad list from pads config
         for pad_cfg in pads_config:
@@ -840,16 +1051,38 @@ def play_chord_demo(player, notes):
 # Main
 # ---------------------------------------------------------------------------
 
+def _deep_merge(base, override):
+    """Merge override dict into base dict (non-destructive, one level deep).
+
+    Values in override take precedence. Sub-dicts are merged (not replaced).
+    """
+    result = dict(base)
+    for key, val in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+            result[key] = _deep_merge(result[key], val)
+        else:
+            result[key] = val
+    return result
+
+
 def main():
     print("\n" + "=" * 40)
     print("  rpiPan - Steel Pan for Pico")
     print("=" * 40)
+
+    # Detect board
+    board_id = detect_board()
+    print("Board: {}".format(board_id))
 
     # Load layout and hardware config
     notes, hw_config = load_layout("pan_layout.json")
     if not notes:
         print("No notes loaded. Check pan_layout.json.")
         return
+
+    # Merge board defaults with JSON config (JSON overrides defaults)
+    defaults = get_board_defaults(board_id)
+    hw_config = _deep_merge(defaults, hw_config)
 
     print("\nLoaded {} notes from pan_layout.json".format(len(notes)))
 
@@ -873,7 +1106,10 @@ def main():
     ))
 
     # Hardware config with defaults
+    audio_out = hw_config.get("audio_out", "pwm")
     audio_pin = hw_config.get("audio_pin", "GP18")
+    i2s_config = hw_config.get("i2s", {})
+    adc_config = hw_config.get("adc", None)
     input_mode = hw_config.get("input_mode", "button")
     led_pin_name = hw_config.get("led_pin", "LED")
     max_voices = hw_config.get("max_voices", 8)
@@ -881,7 +1117,11 @@ def main():
     sounds_dir = hw_config.get("sounds_dir", "sounds")
     pin_map = hw_config.get("pins", {})
 
-    print("\nAudio: {} ({} voices, {} Hz)".format(audio_pin, max_voices, sample_rate))
+    if audio_out == "i2s":
+        print("\nAudio: I2S ({} voices, {} Hz)".format(max_voices, sample_rate))
+    else:
+        print("\nAudio: PWM on {} ({} voices, {} Hz)".format(
+            audio_pin, max_voices, sample_rate))
     print("Input: {}".format(input_mode))
 
     # LED indicator
@@ -898,7 +1138,9 @@ def main():
     player = None
     try:
         player = WavPlayer(
+            audio_out=audio_out,
             audio_pin=audio_pin,
+            i2s_config=i2s_config,
             max_voices=max_voices,
             sample_rate=sample_rate,
             sounds_dir=sounds_dir,
@@ -952,10 +1194,10 @@ def main():
     if input_mode == "mux_scan":
         mux_config = hw_config.get("mux", {})
         pads_config = hw_config.get("pads", [])
-        inputs = MuxScanInput(notes, mux_config, pads_config)
+        inputs = MuxScanInput(notes, mux_config, pads_config, adc_config)
     elif input_mode == "mux_touch":
         mux_config = hw_config.get("mux", {})
-        inputs = MuxTouchInput(pin_map, notes, mux_config)
+        inputs = MuxTouchInput(pin_map, notes, mux_config, adc_config)
     elif input_mode == "touch":
         inputs = TouchInput(pin_map, notes)
     else:

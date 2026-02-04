@@ -2,11 +2,27 @@
 
 ## Full 29-Pad Tenor Pan (mux_scan mode)
 
-The `mux_scan` mode uses **2x HW-178 modules** (CD74HC4067 16-channel analog
-multiplexer breakout boards) to scan all 29 pads through just 9 Pico GPIO
-pins. Each pad has an FSR (Force Sensitive Resistor) in a voltage divider.
-The analog reading provides both touch detection (threshold crossing) and
-velocity (signal magnitude).
+The default configuration uses:
+
+- **Waveshare Pico-Audio** HAT for I2S audio output (PCM5101A DAC)
+- **ADS1115** I2C ADC for reading the mux analog signals
+- **2x HW-178** (CD74HC4067) analog multiplexer modules for 29 FSR pads
+
+Since the Pico-Audio HAT occupies GP26/GP27/GP28 (the Pico's only ADC pins)
+for I2S, an external ADS1115 I2C ADC reads the mux analog outputs instead.
+This gives 16-bit resolution at up to 860 samples/second.
+
+### Components
+
+| Component | Description |
+|-----------|-------------|
+| Raspberry Pi Pico / Pico 2 | Main controller |
+| Waveshare Pico-Audio | I2S DAC HAT (PCM5101A), plugs onto Pico |
+| ADS1115 | 16-bit I2C ADC breakout (4 channels) |
+| 2x HW-178 | CD74HC4067 16-channel analog mux breakout |
+| 29x FSR | Force Sensitive Resistors (one per pad) |
+| 29x 10K resistor | Voltage dividers for FSR pads |
+| 4W speaker (4-8 ohm) | Connects to Pico-Audio 3.5mm or speaker header |
 
 The HW-178 is a common breakout board (17x40mm) with a 1x8 header
 (SIG, S0-S3, EN, VCC, GND) and a 1x16 header (C0-C15). It operates at
@@ -18,46 +34,66 @@ to switch between the two muxes.
 
 | Pin | Function | Description |
 |-----|----------|-------------|
+| GP4 | I2C SDA | ADS1115 data |
+| GP5 | I2C SCL | ADS1115 clock |
 | GP10 | S0 (output) | Mux select bit 0 (shared) |
 | GP11 | S1 (output) | Mux select bit 1 (shared) |
 | GP12 | S2 (output) | Mux select bit 2 (shared) |
 | GP13 | S3 (output) | Mux select bit 3 (shared) |
 | GP14 | EN_A (output) | Mux A enable (active low) |
 | GP15 | EN_B (output) | Mux B enable (active low) |
-| GP26 | ADC0 (input) | Mux A signal (analog) |
-| GP27 | ADC1 (input) | Mux B signal (analog) |
-| GP18 | Audio (output) | PWM audio to speaker/amp |
+| GP26 | I2S DATA | Pico-Audio DIN (via HAT) |
+| GP27 | I2S BCK | Pico-Audio bit clock (via HAT) |
+| GP28 | I2S LRCK | Pico-Audio word clock (via HAT) |
 | GP25 | LED | Onboard LED (activity) |
 
-**10 pins used, 16 free** for future expansion.
+**12 pins used, 14 free** for future expansion.
+
+The Pico-Audio HAT plugs directly onto the Pico headers — no wiring
+needed for audio. Power (3.3V, 5V, GND) is supplied through the HAT
+headers too.
 
 ### Main Wiring
 
 ```
-                       Raspberry Pi Pico
-                   ┌─────────────────────────┐
-                   │                         │
-             3.3V ─┤3V3                  GP18├──[1K]──┬── Amp/Speaker (+)
-                   │                         │        │
-              GND ─┤GND                  GND ├────┐ [100nF]
-                   │                         │    │   │
-                   │  MUX SELECT (shared)    │    │  GND
-                   │                         │    │
-           S0 ◄── ┤GP10             GP26/ADC0├────┼── Mux A SIG
-           S1 ◄── ┤GP11             GP27/ADC1├────┼── Mux B SIG
-           S2 ◄── ┤GP12                     │    │
-           S3 ◄── ┤GP13                     │    │
-                   │                         │    │
-        EN_A ◄── ┤GP14                     │    │
-        EN_B ◄── ┤GP15                     │    │
-                   │                         │    │
-                   │                  3V3    ├──┐ │
-                   │                  GND    ├──┼─┘
-                   └─────────────────────────┘  │
-                                                │
-          ┌─────────────────────────────────────┘
-          │
-        3.3V
+                     Raspberry Pi Pico
+                 ┌─────────────────────────┐
+                 │                         │
+           3.3V ─┤3V3              GP26    ├─┐
+                 │                 GP27    ├─┤── Pico-Audio HAT
+            GND ─┤GND              GP28    ├─┤   (plugs directly
+                 │                 3V3     ├─┤    onto Pico headers)
+                 │                 GND     ├─┘
+                 │  MUX SELECT (shared)    │
+                 │                         │
+         S0 ◄── ┤GP10                     │
+         S1 ◄── ┤GP11                     │
+         S2 ◄── ┤GP12                     │
+         S3 ◄── ┤GP13                     │
+                 │                         │
+      EN_A ◄── ┤GP14                     │
+      EN_B ◄── ┤GP15                     │
+                 │                         │
+     I2C SDA ── ┤GP4                      │
+     I2C SCL ── ┤GP5                      │
+                 │                         │
+                 └─────────────────────────┘
+
+
+    ┌──────────────────────┐
+    │  ADS1115  (I2C ADC)  │
+    │                      │
+    │  VCC ── 3.3V         │
+    │  GND ── GND          │
+    │  SDA ── GP4          │
+    │  SCL ── GP5          │
+    │  ADDR ── GND (0x48)  │
+    │                      │
+    │  A0  ── Mux A SIG    │
+    │  A1  ── Mux B SIG    │
+    │  A2  ── (free)       │
+    │  A3  ── (free)       │
+    └──────────────────────┘
 
 
     ┌─────────────────────────────┐  ┌─────────────────────────────┐
@@ -66,7 +102,7 @@ to switch between the two muxes.
     │  VCC ── 3.3V                │  │  VCC ── 3.3V                │
     │  GND ── GND                 │  │  GND ── GND                 │
     │  EN  ── GP14                │  │  EN  ── GP15                │
-    │  SIG ── GP26 (ADC0)         │  │  SIG ── GP27 (ADC1)         │
+    │  SIG ── ADS1115 A0          │  │  SIG ── ADS1115 A1          │
     │  S0  ── GP10 ──────────┐    │  │  S0  ── GP10 ──────────┐    │
     │  S1  ── GP11 ──────────┤    │  │  S1  ── GP11 ──────────┤    │
     │  S2  ── GP12 ──────────┤    │  │  S2  ── GP12 ──────────┤    │
@@ -144,31 +180,58 @@ channel input (C0-C15). No separate digital pin needed.
 | 27 | Eb6 | inner | B | 11 | 87 |
 | 28 | E6 | inner | B | 12 | 88 |
 
-### Audio Output (4W speaker via amplifier)
+### Audio Output (Waveshare Pico-Audio HAT)
 
-**Do not drive a speaker directly from the Pico GPIO** — the GPIO can only
-source ~12mA at 3.3V. Use a class-D amplifier module.
+The Pico-Audio HAT plugs directly onto the Pico. It contains a PCM5101A
+I2S DAC and APA2068 amplifier. Audio is output via:
 
-Recommended: **PAM8403** (2x3W stereo, ~$1) or **MAX98357A** (3W mono I2S).
-For a 4W / 4-8 ohm speaker, the PAM8403 is ideal:
+- **3.5mm headphone jack** (line level)
+- **Speaker header** (amplified, for 4W / 4-8 ohm speaker)
+
+No external amplifier, RC filter, or additional wiring is needed for
+audio — the HAT handles everything. Volume is controlled in software
+via velocity.
+
+The I2S connection uses 3 pins (fixed by the HAT PCB):
+
+| I2S Signal | Pico Pin | Pico-Audio Pin |
+|------------|----------|----------------|
+| DATA | GP26 | DIN |
+| BCK (bit clock) | GP27 | BCK |
+| LRCK (word clock) | GP28 | LRCK |
+
+**Note:** The Pico-Audio Rev2.1 (CS4344) uses different pin assignments.
+If you have the Rev2.1, update the `"i2s"` section in `pan_layout.json`.
+
+## Alternative: PWM Audio (no I2S HAT)
+
+If you don't have a Pico-Audio HAT, you can use PWM audio output instead.
+This frees up GP26/GP27/GP28 for native ADC, so no ADS1115 is needed.
+
+Change `pan_layout.json`:
+
+```json
+"audio_out": "pwm",
+"audio_pin": "GP18",
+"mux": {
+  "mux_a": {"analog_pin": "GP26", "enable_pin": "GP14"},
+  "mux_b": {"analog_pin": "GP27", "enable_pin": "GP15"},
+  ...
+}
+```
+
+Remove the `"adc"` and `"i2s"` sections. PWM audio needs an external
+amplifier (e.g. PAM8403) with an RC filter:
 
 ```
                 PAM8403 module
 GP18 ─── [1K] ───┬─── L-IN ┌──────────┐
-                  │         │ PAM8403  │──── Speaker + (4W, 4-8Ω)
+                  │         │ PAM8403  │──── Speaker + (4W, 4-8 ohm)
                [100nF]      │          │──── Speaker -
                   │    GND ─┤ GND      │
                  GND   5V ──┤ VCC      │  ← power from USB or battery
                             └──────────┘
-
-    RC filter (1K + 100nF): smooths PWM before amplifier input
-    PAM8403 VCC: 5V from Pico VBUS pin (USB power) or external supply
-    Volume: controlled by velocity in software (no pot needed)
 ```
-
-The RC low-pass filter (1K + 100nF, ~1.6 kHz cutoff) removes the PWM
-carrier frequency. The PAM8403 amplifies the filtered audio signal to
-drive the 4W speaker.
 
 ## Simpler Configurations
 
@@ -200,12 +263,12 @@ The pin names in `pan_layout.json` are board-agnostic — they reference
 whatever names CircuitPython's `board` module provides. Change the pin
 names to match your board:
 
-| Board | ADC pins | GPIO pins | Audio |
-|-------|----------|-----------|-------|
-| Pico / Pico 2 | GP26, GP27, GP28 | GP0-GP22 | Any GP pin |
-| Pico W | GP26, GP27, GP28 | GP0-GP22 | Any GP pin |
-| ESP32-S3 | IO1-IO10 | IO0-IO48 | Any IO pin |
-| Arduino Nano RP2040 | A0-A3 | D0-D13 | Any D pin |
+| Board | I2C pins | GPIO pins | I2S / Audio |
+|-------|----------|-----------|-------------|
+| Pico / Pico 2 | GP4/GP5 (I2C0) | GP0-GP22 | GP26-28 (I2S) or any (PWM) |
+| Pico W | GP4/GP5 (I2C0) | GP0-GP22 | GP26-28 (I2S) or any (PWM) |
+| ESP32-S3 | IO8/IO9 | IO0-IO48 | Any IO pins |
+| Arduino Nano RP2040 | A4/A5 | D0-D13 | Any D pin |
 
 ## Tuning
 
@@ -217,3 +280,5 @@ names to match your board:
   channel. Increase if readings are noisy or crosstalk between channels.
 - **Velocity curve**: `(vel/127)^0.7` in the player. The linear ADC-to-velocity
   mapping combined with this power curve gives natural-feeling dynamics.
+- **ADS1115 data rate**: Set to 860 SPS (maximum) by default. Full 29-pad
+  scan takes ~35ms at this rate (~28 Hz). Sufficient for steel pan input.

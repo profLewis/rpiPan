@@ -176,14 +176,24 @@
     }
   ],
   "hardware": {
-    "audio_pin": "GP18",
+    "audio_out": "i2s",
+    "i2s": {
+      "bit_clock": "GP27",
+      "word_select": "GP28",
+      "data": "GP26"
+    },
     "input_mode": "mux_scan",
     "max_voices": 8,
     "sample_rate": 22050,
+    "adc": {
+      "type": "i2c",
+      "sda": "GP4",
+      "scl": "GP5"
+    },
     "mux": {
       "select_pins": ["GP10", "GP11", "GP12", "GP13"],
-      "mux_a": {"analog_pin": "GP26", "enable_pin": "GP14"},
-      "mux_b": {"analog_pin": "GP27", "enable_pin": "GP15"},
+      "mux_a": {"enable_pin": "GP14"},
+      "mux_b": {"enable_pin": "GP15"},
       "threshold": 3000,
       "settle_us": 100
     },
