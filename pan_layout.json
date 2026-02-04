@@ -1,0 +1,189 @@
+{
+  "notes": [
+    {
+      "name": "Eb",
+      "octave": 6,
+      "ring": "inner",
+      "idx": "I4"
+    },
+    {
+      "name": "D",
+      "octave": 6,
+      "ring": "inner",
+      "idx": "I2"
+    },
+    {
+      "name": "G",
+      "octave": 5,
+      "ring": "central",
+      "idx": "C5"
+    },
+    {
+      "name": "D",
+      "octave": 5,
+      "ring": "central",
+      "idx": "C4"
+    },
+    {
+      "name": "A",
+      "octave": 5,
+      "ring": "central",
+      "idx": "C3"
+    },
+    {
+      "name": "E",
+      "octave": 5,
+      "ring": "central",
+      "idx": "C2"
+    },
+    {
+      "name": "B",
+      "octave": 5,
+      "ring": "central",
+      "idx": "C1"
+    },
+    {
+      "name": "F#",
+      "octave": 5,
+      "ring": "central",
+      "idx": "C0"
+    },
+    {
+      "name": "C#",
+      "octave": 5,
+      "ring": "central",
+      "idx": "C11"
+    },
+    {
+      "name": "Ab",
+      "octave": 5,
+      "ring": "central",
+      "idx": "C10"
+    },
+    {
+      "name": "Eb",
+      "octave": 5,
+      "ring": "central",
+      "idx": "C9"
+    },
+    {
+      "name": "Bb",
+      "octave": 5,
+      "ring": "central",
+      "idx": "C8"
+    },
+    {
+      "name": "F",
+      "octave": 5,
+      "ring": "central",
+      "idx": "C7"
+    },
+    {
+      "name": "C#",
+      "octave": 4,
+      "ring": "outer",
+      "idx": "O11"
+    },
+    {
+      "name": "Ab",
+      "octave": 4,
+      "ring": "outer",
+      "idx": "O10"
+    },
+    {
+      "name": "Eb",
+      "octave": 4,
+      "ring": "outer",
+      "idx": "O9"
+    },
+    {
+      "name": "Bb",
+      "octave": 4,
+      "ring": "outer",
+      "idx": "O8"
+    },
+    {
+      "name": "F",
+      "octave": 4,
+      "ring": "outer",
+      "idx": "O7"
+    },
+    {
+      "name": "G",
+      "octave": 4,
+      "ring": "outer",
+      "idx": "O5"
+    },
+    {
+      "name": "D",
+      "octave": 4,
+      "ring": "outer",
+      "idx": "O4"
+    },
+    {
+      "name": "A",
+      "octave": 4,
+      "ring": "outer",
+      "idx": "O3"
+    },
+    {
+      "name": "E",
+      "octave": 4,
+      "ring": "outer",
+      "idx": "O2"
+    },
+    {
+      "name": "B",
+      "octave": 4,
+      "ring": "outer",
+      "idx": "O1"
+    },
+    {
+      "name": "F#",
+      "octave": 4,
+      "ring": "outer",
+      "idx": "O0"
+    },
+    {
+      "name": "C",
+      "octave": 4,
+      "ring": "outer",
+      "idx": "O6"
+    },
+    {
+      "name": "C",
+      "octave": 6,
+      "ring": "inner",
+      "idx": "I3"
+    },
+    {
+      "name": "E",
+      "octave": 6,
+      "ring": "inner",
+      "idx": "I1"
+    },
+    {
+      "name": "C#",
+      "octave": 6,
+      "ring": "inner",
+      "idx": "I0"
+    },
+    {
+      "name": "C",
+      "octave": 5,
+      "ring": "central",
+      "idx": "C6"
+    }
+  ],
+  "hardware": {
+      "audio_pin": "GP18",
+      "input_mode": "button",
+      "max_voices": 8,
+      "sample_rate": 22050,
+      "pins": {
+        "GP0": "C4",
+        "GP1": "D4",
+        "GP2": "E4"
+      }
+    }
+}
