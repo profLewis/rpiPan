@@ -236,6 +236,7 @@ If WAV files or `audiomixer` are unavailable, the code falls back to simple PWM 
 | File | Description |
 |------|-------------|
 | `code.py` | Main CircuitPython program (copy to Pico as `code.py`) |
+| `test_hw.py` | Hardware diagnostic (copy to Pico as `code.py` to run) |
 | `pan_layout.json` | Note layout + hardware configuration |
 | `install.py` | Sample converter and Pico installer |
 | `WIRING.md` | Wiring diagram (I2S + ADS1115 + dual mux) |
