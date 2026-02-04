@@ -183,7 +183,7 @@
       "data": "GP26"
     },
     "input_mode": "mux_scan",
-    "max_voices": 8,
+    "max_voices": 6,
     "sample_rate": 22050,
     "adc": {
       "type": "i2c",

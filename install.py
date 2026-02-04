@@ -56,7 +56,7 @@ TARGET_CHANNELS = 1
 TARGET_SAMPWIDTH = 2  # 16-bit
 
 # Default size budget for WAV sounds in MicroPython staging
-MP_SOUNDS_MAX_BYTES = int(1.5 * 1024 * 1024)  # 1.5 MB
+MP_SOUNDS_MAX_BYTES = 1024 * 1024  # 1 MB
 
 
 # ---------------------------------------------------------------------------
@@ -336,14 +336,27 @@ def stage_micropython(converted_dir, available, layout_path, dry_run=False,
     staging = os.path.join(SCRIPT_DIR, "micropython_staging")
     main_src = os.path.join(SCRIPT_DIR, "main_mp.py")
     test_src = os.path.join(SCRIPT_DIR, "test_hw_mp.py")
+    diskinfo_src = os.path.join(SCRIPT_DIR, "diskinfo_mp.py")
 
     print("\n--- Staging MicroPython files ---")
 
     if not dry_run:
         os.makedirs(staging, exist_ok=True)
 
-    # 1. Copy main_mp.py -> main.py
+    # 1. Copy diskinfo_mp.py -> diskinfo.py
     code_size = 0
+    dst = os.path.join(staging, "diskinfo.py")
+    if os.path.isfile(diskinfo_src):
+        if dry_run:
+            print("  Would copy: diskinfo_mp.py -> diskinfo.py")
+            code_size += os.path.getsize(diskinfo_src)
+        else:
+            shutil.copy(diskinfo_src, dst)
+            sz = os.path.getsize(dst)
+            code_size += sz
+            print("  diskinfo.py ({:.0f} KB)".format(sz / 1024))
+
+    # 3. Copy main_mp.py -> main.py
     dst = os.path.join(staging, "main.py")
     if dry_run:
         print("  Would copy: main_mp.py -> main.py")
@@ -354,7 +367,7 @@ def stage_micropython(converted_dir, available, layout_path, dry_run=False,
         code_size += sz
         print("  main.py ({:.0f} KB)".format(sz / 1024))
 
-    # 2. Copy test_hw_mp.py -> test_hw.py
+    # 4. Copy test_hw_mp.py -> test_hw.py
     dst = os.path.join(staging, "test_hw.py")
     if os.path.isfile(test_src):
         if dry_run:
@@ -366,7 +379,7 @@ def stage_micropython(converted_dir, available, layout_path, dry_run=False,
             code_size += sz
             print("  test_hw.py ({:.0f} KB)".format(sz / 1024))
 
-    # 3. Copy pan_layout.json
+    # 5. Copy pan_layout.json
     dst = os.path.join(staging, "pan_layout.json")
     if dry_run:
         print("  Would copy: pan_layout.json")
@@ -377,7 +390,7 @@ def stage_micropython(converted_dir, available, layout_path, dry_run=False,
         code_size += sz
         print("  pan_layout.json ({:.0f} KB)".format(sz / 1024))
 
-    # 4. Copy converted sounds, trimming if needed to fit budget
+    # 6. Copy converted sounds, trimming if needed to fit budget
     sounds_dst = os.path.join(staging, "sounds")
     if not dry_run:
         os.makedirs(sounds_dst, exist_ok=True)
@@ -469,6 +482,7 @@ def stage_micropython(converted_dir, available, layout_path, dry_run=False,
         print("  Option 2 — mpremote (command line):")
         print("    pip install mpremote")
         print("    cd {}".format(staging))
+        print("    mpremote fs cp diskinfo.py :diskinfo.py")
         print("    mpremote fs cp main.py :main.py")
         print("    mpremote fs cp pan_layout.json :pan_layout.json")
         print("    mpremote fs cp test_hw.py :test_hw.py")
@@ -500,9 +514,51 @@ def _upload_mpremote(staging):
             print("  Could not install mpremote: {}".format(e))
             return False
 
+    # Clean old files on Pico (preserve .txt files like boot_out.txt)
+    print("\nCleaning old files on Pico...")
+    cleanup_code = (
+        "import os\n"
+        "def rmtree(p):\n"
+        "    for f in os.listdir(p):\n"
+        "        fp = p.rstrip('/') + '/' + f\n"
+        "        try:\n"
+        "            os.remove(fp)\n"
+        "        except:\n"
+        "            rmtree(fp)\n"
+        "            os.rmdir(fp)\n"
+        "removed = []\n"
+        "for f in os.listdir('/'):\n"
+        "    if f.endswith('.txt'):\n"
+        "        continue\n"
+        "    fp = '/' + f\n"
+        "    try:\n"
+        "        os.remove(fp)\n"
+        "        removed.append(f)\n"
+        "    except:\n"
+        "        try:\n"
+        "            rmtree(fp)\n"
+        "            os.rmdir(fp)\n"
+        "            removed.append(f + '/')\n"
+        "        except Exception as e:\n"
+        "            print('  skip:', f, e)\n"
+        "print('Removed:', ', '.join(removed) if removed else '(none)')\n"
+    )
+    try:
+        result = subprocess.run(
+            ["mpremote", "exec", cleanup_code],
+            capture_output=True, text=True, timeout=30)
+        output = (result.stdout + result.stderr).strip()
+        if output:
+            print("  {}".format(output))
+    except subprocess.CalledProcessError as e:
+        print("  WARNING: cleanup failed: {}".format(e))
+    except subprocess.TimeoutExpired:
+        print("  WARNING: cleanup timed out")
+
     # Upload files
     print("\nUploading to Pico via mpremote...")
     files = [
+        ("diskinfo.py", ":diskinfo.py"),
         ("main.py", ":main.py"),
         ("pan_layout.json", ":pan_layout.json"),
         ("test_hw.py", ":test_hw.py"),
@@ -931,8 +987,8 @@ def main():
         help="Only install CircuitPython libraries, skip everything else",
     )
     parser.add_argument(
-        "--max-sounds-mb", type=float, default=1.5,
-        help="Max total size for WAV sounds in MB (default: 1.5)",
+        "--max-sounds-mb", type=float, default=1.0,
+        help="Max total size for WAV sounds in MB (default: 1.0)",
     )
 
     args = parser.parse_args()
