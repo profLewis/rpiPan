@@ -18,7 +18,7 @@ A steel pan instrument running CircuitPython. Designed for the Raspberry Pi Pico
 - Raspberry Pi Pico / Pico 2 (or any CircuitPython board)
 - 4W speaker via class-D amplifier (e.g. PAM8403) on GP18
 - 29 FSR (Force Sensitive Resistor) touch pads
-- 2x CD74HC4067 16-channel analog multiplexers
+- 2x HW-178 multiplexer modules (CD74HC4067 16-channel analog mux breakout)
 - See [WIRING.md](WIRING.md) for the full wiring diagram
 
 ## Quick Start

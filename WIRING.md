@@ -2,10 +2,17 @@
 
 ## Full 29-Pad Tenor Pan (mux_scan mode)
 
-The `mux_scan` mode uses **2x CD74HC4067** analog multiplexers to scan all
-29 pads through just 9 Pico GPIO pins. Each pad has an FSR (Force Sensitive
-Resistor) in a voltage divider. The analog reading provides both touch
-detection (threshold crossing) and velocity (signal magnitude).
+The `mux_scan` mode uses **2x HW-178 modules** (CD74HC4067 16-channel analog
+multiplexer breakout boards) to scan all 29 pads through just 9 Pico GPIO
+pins. Each pad has an FSR (Force Sensitive Resistor) in a voltage divider.
+The analog reading provides both touch detection (threshold crossing) and
+velocity (signal magnitude).
+
+The HW-178 is a common breakout board (17x40mm) with a 1x8 header
+(SIG, S0-S3, EN, VCC, GND) and a 1x16 header (C0-C15). It operates at
+2-6V, so it works directly with the Pico's 3.3V logic. The EN pin has an
+internal pull-down (enabled by default) — our wiring drives EN explicitly
+to switch between the two muxes.
 
 ### Pico Pin Allocation
 
@@ -54,7 +61,7 @@ detection (threshold crossing) and velocity (signal magnitude).
 
 
     ┌─────────────────────────────┐  ┌─────────────────────────────┐
-    │   MUX A  (CD74HC4067)       │  │   MUX B  (CD74HC4067)       │
+    │   MUX A  (HW-178)           │  │   MUX B  (HW-178)           │
     │                             │  │                             │
     │  VCC ── 3.3V                │  │  VCC ── 3.3V                │
     │  GND ── GND                 │  │  GND ── GND                 │
