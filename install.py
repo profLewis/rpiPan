@@ -55,6 +55,9 @@ TARGET_RATE = 22050
 TARGET_CHANNELS = 1
 TARGET_SAMPWIDTH = 2  # 16-bit
 
+# Default size budget for MicroPython staging directory
+MP_STAGING_MAX_BYTES = int(1.5 * 1024 * 1024)  # 1.5 MB
+
 
 # ---------------------------------------------------------------------------
 # WAV conversion
@@ -156,6 +159,44 @@ def resample(samples, src_rate, dst_rate):
         result.append(int(val))
 
     return result
+
+
+def trim_wav(src_path, dst_path, max_samples, fade_samples=1102):
+    """Copy a WAV file, trimming to max_samples with a fade-out.
+
+    Expects 16-bit mono input (as produced by convert_wav).
+    fade_samples defaults to ~50ms at 22050 Hz.
+    If the file is already short enough, copies it unchanged.
+    Returns the number of samples in the output file.
+    """
+    with wave.open(src_path, "rb") as src:
+        params = src.getparams()
+        n_frames = src.getnframes()
+        raw = src.readframes(n_frames)
+
+    n_samples = len(raw) // 2
+    if n_samples <= max_samples:
+        shutil.copy(src_path, dst_path)
+        return n_samples
+
+    # Decode, truncate
+    samples = list(struct.unpack("<{}h".format(n_samples), raw))
+    samples = samples[:max_samples]
+
+    # Apply linear fade-out over last fade_samples
+    fade_len = min(fade_samples, len(samples))
+    for i in range(fade_len):
+        pos = len(samples) - fade_len + i
+        factor = 1.0 - (i / fade_len)
+        samples[pos] = int(samples[pos] * factor)
+
+    with wave.open(dst_path, "wb") as dst:
+        dst.setnchannels(params.nchannels)
+        dst.setsampwidth(params.sampwidth)
+        dst.setframerate(params.framerate)
+        dst.writeframes(struct.pack("<{}h".format(len(samples)), *samples))
+
+    return len(samples)
 
 
 # ---------------------------------------------------------------------------
@@ -284,11 +325,13 @@ def convert_samples(source_dir, converted_dir, layout_path, target_rate,
     return available, True
 
 
-def stage_micropython(converted_dir, available, layout_path, dry_run=False):
+def stage_micropython(converted_dir, available, layout_path, dry_run=False,
+                      max_staging_bytes=MP_STAGING_MAX_BYTES):
     """Stage MicroPython files for upload via Thonny or mpremote.
 
     Creates micropython_staging/ with main.py, test_hw.py,
-    pan_layout.json, and sounds/.
+    pan_layout.json, and sounds/.  Trims WAV samples with a fade-out
+    if the total staging size would exceed max_staging_bytes.
     """
     staging = os.path.join(SCRIPT_DIR, "micropython_staging")
     main_src = os.path.join(SCRIPT_DIR, "main_mp.py")
@@ -300,34 +343,66 @@ def stage_micropython(converted_dir, available, layout_path, dry_run=False):
         os.makedirs(staging, exist_ok=True)
 
     # 1. Copy main_mp.py -> main.py
+    code_size = 0
     dst = os.path.join(staging, "main.py")
     if dry_run:
         print("  Would copy: main_mp.py -> main.py")
+        code_size += os.path.getsize(main_src)
     else:
         shutil.copy(main_src, dst)
-        print("  main.py ({:.0f} KB)".format(os.path.getsize(dst) / 1024))
+        sz = os.path.getsize(dst)
+        code_size += sz
+        print("  main.py ({:.0f} KB)".format(sz / 1024))
 
     # 2. Copy test_hw_mp.py -> test_hw.py
     dst = os.path.join(staging, "test_hw.py")
     if os.path.isfile(test_src):
         if dry_run:
             print("  Would copy: test_hw_mp.py -> test_hw.py")
+            code_size += os.path.getsize(test_src)
         else:
             shutil.copy(test_src, dst)
-            print("  test_hw.py ({:.0f} KB)".format(os.path.getsize(dst) / 1024))
+            sz = os.path.getsize(dst)
+            code_size += sz
+            print("  test_hw.py ({:.0f} KB)".format(sz / 1024))
 
     # 3. Copy pan_layout.json
     dst = os.path.join(staging, "pan_layout.json")
     if dry_run:
         print("  Would copy: pan_layout.json")
+        code_size += os.path.getsize(layout_path)
     else:
         shutil.copy(layout_path, dst)
-        print("  pan_layout.json ({:.0f} KB)".format(os.path.getsize(dst) / 1024))
+        sz = os.path.getsize(dst)
+        code_size += sz
+        print("  pan_layout.json ({:.0f} KB)".format(sz / 1024))
 
-    # 4. Copy converted sounds
+    # 4. Copy converted sounds, trimming if needed to fit budget
     sounds_dst = os.path.join(staging, "sounds")
     if not dry_run:
         os.makedirs(sounds_dst, exist_ok=True)
+
+    sound_budget = max_staging_bytes - code_size
+    n_files = len([f for f in available
+                   if os.path.isfile(os.path.join(converted_dir, f))])
+
+    # Check if trimming is needed
+    current_sound_size = sum(
+        os.path.getsize(os.path.join(converted_dir, f))
+        for f in available
+        if os.path.isfile(os.path.join(converted_dir, f)))
+
+    max_samples = None
+    if current_sound_size > sound_budget and n_files > 0:
+        # Calculate max samples per file to fit budget
+        # Each file = max_samples * 2 (bytes) + 44 (header)
+        bytes_per_file = sound_budget // n_files
+        max_samples = (bytes_per_file - 44) // 2
+        if max_samples < 2205:  # minimum 0.1s
+            max_samples = 2205
+        duration = max_samples / TARGET_RATE
+        print("  Trimming samples to {:.1f}s ({:.1f} MB budget, {:.0f} KB code)".format(
+            duration, max_staging_bytes / 1024 / 1024, code_size / 1024))
 
     copied = 0
     total_size = 0
@@ -337,15 +412,26 @@ def stage_micropython(converted_dir, available, layout_path, dry_run=False):
         if not os.path.isfile(src):
             continue
         if dry_run:
-            print("  Would copy: sounds/{}".format(fname))
+            if max_samples:
+                print("  Would trim: sounds/{}".format(fname))
+            else:
+                print("  Would copy: sounds/{}".format(fname))
         else:
-            shutil.copy(src, dst_file)
+            if max_samples:
+                trim_wav(src, dst_file, max_samples)
+            else:
+                shutil.copy(src, dst_file)
             sz = os.path.getsize(dst_file)
             total_size += sz
         copied += 1
 
     print("  sounds/ ({} files, {:.0f} KB total)".format(
         copied, total_size / 1024))
+
+    # Report total staging size
+    staging_total = code_size + total_size
+    print("  Total staging size: {:.1f} KB ({:.2f} MB)".format(
+        staging_total / 1024, staging_total / 1024 / 1024))
 
     # Check max_voices
     try:
@@ -359,29 +445,93 @@ def stage_micropython(converted_dir, available, layout_path, dry_run=False):
     except Exception:
         pass
 
-    # Print upload instructions
+    # Try uploading via mpremote
     print("\n" + "=" * 50)
     if dry_run:
         print("DRY RUN complete. No files were modified.")
+        print("\nTo upload to your Pico, run without --dry-run.")
+        return True
+
+    print("MicroPython files staged in: {}".format(staging))
+
+    uploaded = _upload_mpremote(staging)
+    if uploaded:
+        print("\nUpload complete. Reset the Pico to run.")
     else:
-        print("MicroPython files staged in: {}".format(staging))
-    print("\nTo upload to your Pico:")
-    print()
-    print("  Option 1 — Thonny IDE (recommended):")
-    print("    1. Open Thonny, connect to Pico")
-    print("    2. View > Files to open the file browser")
-    print("    3. Navigate to {}".format(staging))
-    print("    4. Right-click each file/folder and 'Upload to /'")
-    print()
-    print("  Option 2 — mpremote (command line):")
-    print("    pip install mpremote")
-    print("    cd {}".format(staging))
-    print("    mpremote fs cp main.py :main.py")
-    print("    mpremote fs cp pan_layout.json :pan_layout.json")
-    print("    mpremote fs cp test_hw.py :test_hw.py")
-    print("    mpremote fs cp -r sounds/ :")
-    print()
-    print("Then reset the Pico to run.")
+        print("\nTo upload manually:")
+        print()
+        print("  Option 1 — Thonny IDE:")
+        print("    1. Open Thonny, connect to Pico")
+        print("    2. View > Files to open the file browser")
+        print("    3. Navigate to {}".format(staging))
+        print("    4. Right-click each file/folder and 'Upload to /'")
+        print()
+        print("  Option 2 — mpremote (command line):")
+        print("    pip install mpremote")
+        print("    cd {}".format(staging))
+        print("    mpremote fs cp main.py :main.py")
+        print("    mpremote fs cp pan_layout.json :pan_layout.json")
+        print("    mpremote fs cp test_hw.py :test_hw.py")
+        print("    mpremote fs cp -r sounds/ :")
+        print()
+        print("Then reset the Pico to run.")
+
+    return True
+
+
+def _upload_mpremote(staging):
+    """Try to upload staged files to Pico via mpremote.
+
+    Installs mpremote via pip if not found. Returns True on success.
+    """
+    import subprocess
+
+    # Check if mpremote is available, install if not
+    try:
+        subprocess.run(["mpremote", "version"], capture_output=True, check=True)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        print("mpremote not found, installing...")
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "mpremote"],
+                capture_output=True, check=True)
+            print("  Installed mpremote.")
+        except subprocess.CalledProcessError as e:
+            print("  Could not install mpremote: {}".format(e))
+            return False
+
+    # Upload files
+    print("\nUploading to Pico via mpremote...")
+    files = [
+        ("main.py", ":main.py"),
+        ("pan_layout.json", ":pan_layout.json"),
+        ("test_hw.py", ":test_hw.py"),
+    ]
+    for local, remote in files:
+        src = os.path.join(staging, local)
+        if not os.path.isfile(src):
+            continue
+        print("  {} -> {}".format(local, remote))
+        try:
+            subprocess.run(
+                ["mpremote", "fs", "cp", src, remote],
+                check=True, capture_output=True)
+        except subprocess.CalledProcessError as e:
+            print("  ERROR uploading {}: {}".format(local, e))
+            print("  Is the Pico connected and not in use by another program?")
+            return False
+
+    # Upload sounds directory recursively
+    sounds_dir = os.path.join(staging, "sounds")
+    if os.path.isdir(sounds_dir):
+        print("  sounds/ -> :sounds/")
+        try:
+            subprocess.run(
+                ["mpremote", "fs", "cp", "-r", sounds_dir, ":"],
+                check=True, capture_output=True)
+        except subprocess.CalledProcessError as e:
+            print("  ERROR uploading sounds/: {}".format(e))
+            return False
 
     return True
 
@@ -461,7 +611,8 @@ def install_circuitpython(drive_path, converted_dir, available, layout_path,
 
 
 def install(drive_path, source_dir, platform="micropython", dry_run=False,
-            convert_only=False, target_rate=TARGET_RATE, force=False):
+            convert_only=False, target_rate=TARGET_RATE, force=False,
+            max_staging_bytes=MP_STAGING_MAX_BYTES):
     """Convert samples and install to Pico."""
 
     layout_path = os.path.join(SCRIPT_DIR, "pan_layout.json")
@@ -495,7 +646,8 @@ def install(drive_path, source_dir, platform="micropython", dry_run=False,
     # Deploy based on platform
     if platform == "micropython":
         return stage_micropython(converted_dir, available, layout_path,
-                                 dry_run=dry_run)
+                                 dry_run=dry_run,
+                                 max_staging_bytes=max_staging_bytes)
     else:
         return install_circuitpython(drive_path, converted_dir, available,
                                      layout_path, dry_run=dry_run)
@@ -778,6 +930,10 @@ def main():
         "--libs-only", action="store_true",
         help="Only install CircuitPython libraries, skip everything else",
     )
+    parser.add_argument(
+        "--max-staging-mb", type=float, default=1.5,
+        help="Max size for micropython_staging in MB (default: 1.5)",
+    )
 
     args = parser.parse_args()
 
@@ -806,6 +962,7 @@ def main():
         convert_only=args.convert_only,
         target_rate=args.rate,
         force=args.force,
+        max_staging_bytes=int(args.max_staging_mb * 1024 * 1024),
     )
 
     # Install CircuitPython libraries if requested
