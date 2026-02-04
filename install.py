@@ -55,8 +55,8 @@ TARGET_RATE = 22050
 TARGET_CHANNELS = 1
 TARGET_SAMPWIDTH = 2  # 16-bit
 
-# Default size budget for MicroPython staging directory
-MP_STAGING_MAX_BYTES = int(1.5 * 1024 * 1024)  # 1.5 MB
+# Default size budget for WAV sounds in MicroPython staging
+MP_SOUNDS_MAX_BYTES = int(1.5 * 1024 * 1024)  # 1.5 MB
 
 
 # ---------------------------------------------------------------------------
@@ -326,12 +326,12 @@ def convert_samples(source_dir, converted_dir, layout_path, target_rate,
 
 
 def stage_micropython(converted_dir, available, layout_path, dry_run=False,
-                      max_staging_bytes=MP_STAGING_MAX_BYTES):
+                      max_sounds_bytes=MP_SOUNDS_MAX_BYTES):
     """Stage MicroPython files for upload via Thonny or mpremote.
 
     Creates micropython_staging/ with main.py, test_hw.py,
     pan_layout.json, and sounds/.  Trims WAV samples with a fade-out
-    if the total staging size would exceed max_staging_bytes.
+    if the total sounds size would exceed max_sounds_bytes.
     """
     staging = os.path.join(SCRIPT_DIR, "micropython_staging")
     main_src = os.path.join(SCRIPT_DIR, "main_mp.py")
@@ -382,7 +382,6 @@ def stage_micropython(converted_dir, available, layout_path, dry_run=False,
     if not dry_run:
         os.makedirs(sounds_dst, exist_ok=True)
 
-    sound_budget = max_staging_bytes - code_size
     n_files = len([f for f in available
                    if os.path.isfile(os.path.join(converted_dir, f))])
 
@@ -393,16 +392,16 @@ def stage_micropython(converted_dir, available, layout_path, dry_run=False,
         if os.path.isfile(os.path.join(converted_dir, f)))
 
     max_samples = None
-    if current_sound_size > sound_budget and n_files > 0:
+    if current_sound_size > max_sounds_bytes and n_files > 0:
         # Calculate max samples per file to fit budget
         # Each file = max_samples * 2 (bytes) + 44 (header)
-        bytes_per_file = sound_budget // n_files
+        bytes_per_file = max_sounds_bytes // n_files
         max_samples = (bytes_per_file - 44) // 2
         if max_samples < 2205:  # minimum 0.1s
             max_samples = 2205
         duration = max_samples / TARGET_RATE
-        print("  Trimming samples to {:.1f}s ({:.1f} MB budget, {:.0f} KB code)".format(
-            duration, max_staging_bytes / 1024 / 1024, code_size / 1024))
+        print("  Trimming samples to {:.1f}s (sounds budget {:.1f} MB)".format(
+            duration, max_sounds_bytes / 1024 / 1024))
 
     copied = 0
     total_size = 0
@@ -428,10 +427,11 @@ def stage_micropython(converted_dir, available, layout_path, dry_run=False,
     print("  sounds/ ({} files, {:.0f} KB total)".format(
         copied, total_size / 1024))
 
-    # Report total staging size
-    staging_total = code_size + total_size
-    print("  Total staging size: {:.1f} KB ({:.2f} MB)".format(
-        staging_total / 1024, staging_total / 1024 / 1024))
+    # Report sizes
+    print("  Total sounds: {:.1f} KB ({:.2f} MB)".format(
+        total_size / 1024, total_size / 1024 / 1024))
+    print("  Total staging: {:.1f} KB ({:.2f} MB)".format(
+        (code_size + total_size) / 1024, (code_size + total_size) / 1024 / 1024))
 
     # Check max_voices
     try:
@@ -612,7 +612,7 @@ def install_circuitpython(drive_path, converted_dir, available, layout_path,
 
 def install(drive_path, source_dir, platform="micropython", dry_run=False,
             convert_only=False, target_rate=TARGET_RATE, force=False,
-            max_staging_bytes=MP_STAGING_MAX_BYTES):
+            max_sounds_bytes=MP_SOUNDS_MAX_BYTES):
     """Convert samples and install to Pico."""
 
     layout_path = os.path.join(SCRIPT_DIR, "pan_layout.json")
@@ -647,7 +647,7 @@ def install(drive_path, source_dir, platform="micropython", dry_run=False,
     if platform == "micropython":
         return stage_micropython(converted_dir, available, layout_path,
                                  dry_run=dry_run,
-                                 max_staging_bytes=max_staging_bytes)
+                                 max_sounds_bytes=max_sounds_bytes)
     else:
         return install_circuitpython(drive_path, converted_dir, available,
                                      layout_path, dry_run=dry_run)
@@ -931,8 +931,8 @@ def main():
         help="Only install CircuitPython libraries, skip everything else",
     )
     parser.add_argument(
-        "--max-staging-mb", type=float, default=1.5,
-        help="Max size for micropython_staging in MB (default: 1.5)",
+        "--max-sounds-mb", type=float, default=1.5,
+        help="Max total size for WAV sounds in MB (default: 1.5)",
     )
 
     args = parser.parse_args()
@@ -962,7 +962,7 @@ def main():
         convert_only=args.convert_only,
         target_rate=args.rate,
         force=args.force,
-        max_staging_bytes=int(args.max_staging_mb * 1024 * 1024),
+        max_sounds_bytes=int(args.max_sounds_mb * 1024 * 1024),
     )
 
     # Install CircuitPython libraries if requested
