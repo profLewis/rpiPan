@@ -1,6 +1,6 @@
 # rpiPan
 
-A steel pan instrument running CircuitPython. Designed for the Raspberry Pi Pico / Pico 2 but works on any CircuitPython-compatible board (ESP32-S3, Arduino RP2040, etc.). Plays real WAV samples from the [panipuri](https://github.com/profLewis/paniPuri) project with polyphonic playback and velocity-sensitive touch input via analog multiplexers. All 29 notes of a tenor pan using only 9 GPIO pins.
+A steel pan instrument running CircuitPython. Designed for the Raspberry Pi Pico H but works on any CircuitPython-compatible board (Pico 2, Pico W, ESP32-S3, Arduino RP2040, etc.). Plays real WAV samples from the [panipuri](https://github.com/profLewis/paniPuri) project with polyphonic playback and velocity-sensitive touch input via analog multiplexers. All 29 notes of a tenor pan using only 9 GPIO pins.
 
 ## Features
 
@@ -15,7 +15,7 @@ A steel pan instrument running CircuitPython. Designed for the Raspberry Pi Pico
 
 ## Hardware
 
-- Raspberry Pi Pico / Pico 2 (or any CircuitPython board)
+- Raspberry Pi Pico H (or Pico 2, Pico W, any CircuitPython board)
 - Waveshare Pico-Audio HAT (I2S DAC, PCM5101A) — plugs onto Pico
 - ADS1115 I2C ADC breakout (16-bit, reads mux analog signals)
 - 2x HW-178 multiplexer modules (CD74HC4067 16-channel analog mux breakout)
@@ -49,14 +49,15 @@ This converts the panipuri WAV files (44100 Hz stereo) to Pico-friendly format (
 If using the default I2S audio configuration with ADS1115, install the required libraries:
 
 ```bash
-# Option A: using circup (recommended)
+# Automatic — downloads from the Adafruit Bundle, detects CP version
+python install.py --libs-only /Volumes/CIRCUITPY
+
+# Or combine with sample install
+python install.py --libs /Volumes/CIRCUITPY
+
+# Or manually using circup
 pip install circup
 circup install adafruit_ads1x15 adafruit_bus_device
-
-# Option B: manual — download the Adafruit CircuitPython Bundle from
-# https://circuitpython.org/libraries and copy these to CIRCUITPY/lib/:
-#   adafruit_ads1x15/
-#   adafruit_bus_device/
 ```
 
 The Pico restarts automatically and runs the demo.
@@ -202,6 +203,8 @@ python install.py --convert-only               # Convert without copying to driv
 python install.py --dry-run                    # Preview without changes
 python install.py --force                      # Re-convert even if up to date
 python install.py --rate 44100                 # Keep original sample rate
+python install.py --libs                       # Also install CircuitPython libraries
+python install.py --libs-only                  # Only install libraries
 ```
 
 The converter uses only the Python standard library — no numpy or scipy required. Converted files are cached in `sounds_converted/` so subsequent runs are fast.

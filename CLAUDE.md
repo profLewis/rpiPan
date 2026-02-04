@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-rpiPan is a CircuitPython steel pan instrument. Designed for the Raspberry Pi Pico / Pico 2 but works on any board with CircuitPython support (ESP32-S3, Arduino RP2040, etc.). Reads a JSON layout file (`pan_layout.json`) to configure notes and hardware, plays WAV samples with polyphonic mixing, and supports velocity-sensitive touch input via analog multiplexers. All pin names come from the JSON config, so no code changes needed when switching boards.
+rpiPan is a CircuitPython steel pan instrument. Designed for the Raspberry Pi Pico H but works on any board with CircuitPython support (Pico 2, Pico W, ESP32-S3, Arduino RP2040, etc.). Reads a JSON layout file (`pan_layout.json`) to configure notes and hardware, plays WAV samples with polyphonic mixing, and supports velocity-sensitive touch input via analog multiplexers. All pin names come from the JSON config, so no code changes needed when switching boards.
 
 Companion project to [panipuri](https://github.com/profLewis/paniPuri) (desktop Python version).
 
@@ -52,7 +52,7 @@ Both return objects with a `.value` property (0-65535), matching the `analogio.A
 ### Board Detection
 
 - `detect_board()` — Returns board ID string using `board.board_id` (CircuitPython 7+) or pin probing fallback
-- `BOARD_DEFAULTS` — Dict of default hardware configs per board type (Pico, Pico 2, Pico W, ESP32-S3, Arduino Nano RP2040)
+- `BOARD_DEFAULTS` — Dict of default hardware configs per board type (Pico H, Pico 2, Pico W, ESP32-S3, Arduino Nano RP2040)
 - `get_board_defaults(board_id)` — Looks up defaults, supports prefix matching (e.g. `raspberry_pi_pico2` matches `raspberry_pi_pico`)
 - `_deep_merge(base, override)` — Merges JSON config over board defaults (JSON wins)
 

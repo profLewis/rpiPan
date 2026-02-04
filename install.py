@@ -4,7 +4,9 @@ install.py - Convert WAV samples and install rpiPan to a Pico CIRCUITPY drive.
 
 Converts panipuri's 44100 Hz stereo WAV files to 16-bit mono 22050 Hz
 (suitable for CircuitPython audiomixer), then copies code.py, pan_layout.json,
-and the converted sounds/ to the target drive.
+and the converted sounds/ to the target drive. Can also install required
+CircuitPython libraries (adafruit_ads1x15, adafruit_bus_device) from the
+Adafruit Bundle.
 
 Usage:
     python install.py                          # Uses /Volumes/CIRCUITPY
@@ -12,6 +14,8 @@ Usage:
     python install.py /Volumes/CIRCUITPY --source ../panipuri/sounds
     python install.py --dry-run                # Show what would be done
     python install.py --convert-only           # Just convert, don't copy to drive
+    python install.py --libs                   # Also install CP libraries
+    python install.py --libs-only              # Only install CP libraries
 """
 
 import os
@@ -21,6 +25,15 @@ import wave
 import struct
 import shutil
 import argparse
+import zipfile
+import tempfile
+
+try:
+    from urllib.request import urlopen, Request
+    from urllib.error import URLError
+    HAS_URLLIB = True
+except ImportError:
+    HAS_URLLIB = False
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -365,6 +378,236 @@ def install(drive_path, source_dir, dry_run=False, convert_only=False,
 
 
 # ---------------------------------------------------------------------------
+# CircuitPython library installation
+# ---------------------------------------------------------------------------
+
+# Libraries required for I2S + ADS1115 mode
+REQUIRED_LIBS = [
+    "adafruit_ads1x15",
+    "adafruit_bus_device",
+]
+
+BUNDLE_REPO = "adafruit/Adafruit_CircuitPython_Bundle"
+BUNDLE_API_URL = "https://api.github.com/repos/{}/releases/latest".format(BUNDLE_REPO)
+
+
+def detect_cp_version(drive_path):
+    """Detect CircuitPython major version from boot_out.txt on the drive.
+
+    Returns major version as int (e.g. 9), or None if not detected.
+    """
+    boot_out = os.path.join(drive_path, "boot_out.txt")
+    if not os.path.isfile(boot_out):
+        return None
+
+    with open(boot_out, "r") as f:
+        text = f.read()
+
+    # Look for "CircuitPython X.Y.Z"
+    for word in text.split():
+        parts = word.split(".")
+        if len(parts) >= 2:
+            try:
+                major = int(parts[0])
+                int(parts[1])  # verify second part is also a number
+                if 5 <= major <= 15:  # sanity check
+                    return major
+            except ValueError:
+                continue
+    return None
+
+
+def try_circup(libs):
+    """Try to install libraries using circup. Returns True if successful."""
+    import subprocess
+
+    try:
+        subprocess.run(["circup", "--version"], capture_output=True, check=True)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return False
+
+    print("Using circup to install libraries...")
+    try:
+        result = subprocess.run(
+            ["circup", "install"] + libs,
+            capture_output=True, text=True
+        )
+        print(result.stdout)
+        if result.returncode != 0:
+            print(result.stderr)
+            return False
+        return True
+    except Exception as e:
+        print("circup error: {}".format(e))
+        return False
+
+
+def download_bundle_libs(drive_path, cp_version, libs, dry_run=False):
+    """Download Adafruit CircuitPython Bundle and extract required libraries.
+
+    Uses the GitHub API to find the latest release, downloads the bundle
+    zip, and extracts the specified libraries to CIRCUITPY/lib/.
+    """
+    if not HAS_URLLIB:
+        print("ERROR: urllib not available. Install libraries manually.")
+        return False
+
+    bundle_tag = "{}x-mpy".format(cp_version)
+    print("CircuitPython version: {} (bundle: {})".format(cp_version, bundle_tag))
+
+    # Get latest release info from GitHub API
+    print("Fetching latest bundle release...")
+    try:
+        req = Request(BUNDLE_API_URL, headers={"User-Agent": "rpiPan-installer"})
+        resp = urlopen(req, timeout=30)
+        release = json.loads(resp.read().decode())
+    except Exception as e:
+        print("ERROR: Could not fetch release info: {}".format(e))
+        return False
+
+    # Find the matching bundle asset
+    target_name = None
+    download_url = None
+    for asset in release.get("assets", []):
+        name = asset["name"]
+        if bundle_tag in name and name.endswith(".zip"):
+            target_name = name
+            download_url = asset["browser_download_url"]
+            break
+
+    if not download_url:
+        print("ERROR: No bundle found for CircuitPython {}".format(cp_version))
+        print("Available assets:")
+        for asset in release.get("assets", []):
+            print("  {}".format(asset["name"]))
+        return False
+
+    print("Found: {}".format(target_name))
+
+    if dry_run:
+        print("Would download and extract: {}".format(", ".join(libs)))
+        return True
+
+    # Download the bundle zip
+    print("Downloading ({})...".format(target_name))
+    try:
+        req = Request(download_url, headers={"User-Agent": "rpiPan-installer"})
+        resp = urlopen(req, timeout=120)
+        bundle_data = resp.read()
+    except Exception as e:
+        print("ERROR: Download failed: {}".format(e))
+        return False
+
+    print("Downloaded {:.1f} MB".format(len(bundle_data) / 1024 / 1024))
+
+    # Extract required libraries to CIRCUITPY/lib/
+    lib_dir = os.path.join(drive_path, "lib")
+    os.makedirs(lib_dir, exist_ok=True)
+
+    # Write zip to temp file, then extract
+    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+        tmp.write(bundle_data)
+        tmp_path = tmp.name
+
+    try:
+        extracted = 0
+        with zipfile.ZipFile(tmp_path, "r") as zf:
+            # Find the bundle prefix (e.g. "adafruit-circuitpython-bundle-9.x-mpy-20240101/lib/")
+            prefix = None
+            for name in zf.namelist():
+                if "/lib/" in name:
+                    prefix = name[:name.index("/lib/") + 5]
+                    break
+
+            if not prefix:
+                print("ERROR: Could not find lib/ directory in bundle")
+                return False
+
+            for lib_name in libs:
+                # Libraries can be directories (packages) or single .mpy files
+                lib_prefix = prefix + lib_name
+                found_files = [
+                    n for n in zf.namelist()
+                    if n.startswith(lib_prefix + "/") or n == lib_prefix + ".mpy"
+                ]
+
+                if not found_files:
+                    print("  WARNING: {} not found in bundle".format(lib_name))
+                    continue
+
+                for zip_path in found_files:
+                    # Strip the bundle prefix to get the relative path under lib/
+                    rel_path = zip_path[len(prefix):]
+                    if not rel_path or zip_path.endswith("/"):
+                        # Directory entry — create it
+                        dir_path = os.path.join(lib_dir, rel_path)
+                        os.makedirs(dir_path, exist_ok=True)
+                        continue
+
+                    dst_path = os.path.join(lib_dir, rel_path)
+                    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+
+                    with zf.open(zip_path) as src_f:
+                        with open(dst_path, "wb") as dst_f:
+                            dst_f.write(src_f.read())
+                    extracted += 1
+
+                print("  Installed: {} ({} files)".format(
+                    lib_name, len([f for f in found_files if not f.endswith("/")])))
+
+        print("Extracted {} files to {}/".format(extracted, lib_dir))
+        return True
+
+    finally:
+        os.unlink(tmp_path)
+
+
+def install_libs(drive_path, dry_run=False):
+    """Install required CircuitPython libraries to CIRCUITPY/lib/.
+
+    Tries circup first, falls back to downloading the Adafruit Bundle.
+    """
+    print("\n--- Installing CircuitPython libraries ---")
+    print("Required: {}".format(", ".join(REQUIRED_LIBS)))
+
+    # Check if libraries already exist
+    lib_dir = os.path.join(drive_path, "lib")
+    all_present = True
+    for lib_name in REQUIRED_LIBS:
+        lib_path = os.path.join(lib_dir, lib_name)
+        mpy_path = os.path.join(lib_dir, lib_name + ".mpy")
+        if os.path.exists(lib_path) or os.path.exists(mpy_path):
+            print("  Already installed: {}".format(lib_name))
+        else:
+            all_present = False
+            print("  Missing: {}".format(lib_name))
+
+    if all_present:
+        print("All libraries already installed.")
+        return True
+
+    if dry_run:
+        print("Would install missing libraries.")
+        return True
+
+    # Try circup first
+    if try_circup(REQUIRED_LIBS):
+        print("Libraries installed via circup.")
+        return True
+
+    print("circup not available, downloading from Adafruit Bundle...")
+
+    # Detect CircuitPython version
+    cp_version = detect_cp_version(drive_path)
+    if cp_version is None:
+        print("WARNING: Could not detect CircuitPython version from boot_out.txt")
+        print("Assuming CircuitPython 9.x")
+        cp_version = 9
+
+    return download_bundle_libs(drive_path, cp_version, REQUIRED_LIBS, dry_run)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -397,9 +640,27 @@ def main():
         "--force", action="store_true",
         help="Re-convert WAV files even if already converted",
     )
+    parser.add_argument(
+        "--libs", action="store_true",
+        help="Install required CircuitPython libraries (adafruit_ads1x15, etc.)",
+    )
+    parser.add_argument(
+        "--libs-only", action="store_true",
+        help="Only install libraries, skip WAV conversion and file copy",
+    )
 
     args = parser.parse_args()
 
+    # Install libraries only
+    if args.libs_only:
+        if not os.path.isdir(args.drive):
+            print("ERROR: Drive not found: {}".format(args.drive))
+            print("  Is the Pico connected and mounted?")
+            sys.exit(1)
+        success = install_libs(args.drive, dry_run=args.dry_run)
+        sys.exit(0 if success else 1)
+
+    # Normal install (convert + copy + optionally install libs)
     success = install(
         drive_path=args.drive,
         source_dir=args.source,
@@ -408,6 +669,11 @@ def main():
         target_rate=args.rate,
         force=args.force,
     )
+
+    # Install libraries if requested or if I2S mode is configured
+    if success and args.libs and not args.convert_only:
+        if os.path.isdir(args.drive):
+            install_libs(args.drive, dry_run=args.dry_run)
 
     sys.exit(0 if success else 1)
 

@@ -16,7 +16,7 @@ This gives 16-bit resolution at up to 860 samples/second.
 
 | Component | Description |
 |-----------|-------------|
-| Raspberry Pi Pico / Pico 2 | Main controller |
+| Raspberry Pi Pico H (or Pico 2) | Main controller |
 | Waveshare Pico-Audio | I2S DAC HAT (PCM5101A), plugs onto Pico |
 | ADS1115 | 16-bit I2C ADC breakout (4 channels) |
 | 2x HW-178 | CD74HC4067 16-channel analog mux breakout |
@@ -265,7 +265,7 @@ names to match your board:
 
 | Board | I2C pins | GPIO pins | I2S / Audio |
 |-------|----------|-----------|-------------|
-| Pico / Pico 2 | GP4/GP5 (I2C0) | GP0-GP22 | GP26-28 (I2S) or any (PWM) |
+| Pico H / Pico 2 | GP4/GP5 (I2C0) | GP0-GP22 | GP26-28 (I2S) or any (PWM) |
 | Pico W | GP4/GP5 (I2C0) | GP0-GP22 | GP26-28 (I2S) or any (PWM) |
 | ESP32-S3 | IO8/IO9 | IO0-IO48 | Any IO pins |
 | Arduino Nano RP2040 | A4/A5 | D0-D13 | Any D pin |

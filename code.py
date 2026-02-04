@@ -84,6 +84,18 @@ BOARD_DEFAULTS = {
             "mux_b": {"enable_pin": "GP15"},
         },
     },
+    # Pico H (headers) and Pico 2 share the same pinout as Pico
+    "raspberry_pi_pico_h": {
+        "audio_out": "i2s",
+        "i2s": {"bit_clock": "GP27", "word_select": "GP28", "data": "GP26"},
+        "adc": {"type": "i2c", "sda": "GP4", "scl": "GP5"},
+        "led_pin": "LED",
+        "mux": {
+            "select_pins": ["GP10", "GP11", "GP12", "GP13"],
+            "mux_a": {"enable_pin": "GP14"},
+            "mux_b": {"enable_pin": "GP15"},
+        },
+    },
     "raspberry_pi_pico2": {
         "audio_out": "i2s",
         "i2s": {"bit_clock": "GP27", "word_select": "GP28", "data": "GP26"},
