@@ -16,6 +16,7 @@ Input modes:
     - "button"    : digital GPIO pins, fixed velocity
     - "touch"     : capacitive touch (touchio), fixed velocity
     - "mux_touch" : digital trigger + analog velocity via multiplexer
+    - "mux_scan"  : pure analog scanning (2 muxes, no digital pins needed)
 
 Setup:
     1. Install CircuitPython on the Pico
@@ -587,6 +588,193 @@ class MuxTouchInput:
         return len(self.pads)
 
 
+class MuxScanInput:
+    """Pure analog scanning via dual multiplexers — no digital pins needed.
+
+    Scans all pads through 2x CD74HC4067 muxes sharing select pins.
+    Each mux has its own ADC pin and enable pin. Touch detection uses
+    a configurable voltage threshold; strike intensity above the
+    threshold maps to velocity.
+
+    This mode supports up to 32 pads (16 per mux) using only 9 Pico
+    GPIO pins total, making it ideal for a full 29-note tenor pan.
+
+    Pico pin usage:
+        GP10-GP13 : mux select S0-S3 (shared, 4 pins)
+        GP26      : ADC for mux A (channels 0-15)
+        GP27      : ADC for mux B (channels 0-15)
+        GP14      : mux A enable (active low)
+        GP15      : mux B enable (active low)
+        GP18      : audio output
+
+    Config in pan_layout.json:
+        "hardware": {
+            "input_mode": "mux_scan",
+            "mux": {
+                "select_pins": ["GP10", "GP11", "GP12", "GP13"],
+                "mux_a": {"analog_pin": "GP26", "enable_pin": "GP14"},
+                "mux_b": {"analog_pin": "GP27", "enable_pin": "GP15"},
+                "threshold": 3000,
+                "settle_us": 100
+            },
+            "pads": [
+                {"note": "C4", "mux": "a", "channel": 0},
+                {"note": "D4", "mux": "a", "channel": 1},
+                ...
+            ]
+        }
+    """
+
+    def __init__(self, notes, mux_config, pads_config):
+        import analogio
+
+        self.pads = []
+        by_name, by_idx, by_midi = build_note_lookup(notes)
+
+        # Threshold for touch detection (0-65535, ~3000 ≈ 0.15V)
+        self.threshold = mux_config.get("threshold", 3000)
+        # Settle time in microseconds after switching mux channel
+        self.settle_us = mux_config.get("settle_us", 100)
+
+        # Set up shared mux select pins
+        self.select_pins = []
+        for sp_name in mux_config.get("select_pins", []):
+            sp = getattr(board, sp_name, None)
+            if sp is None:
+                print("WARNING: Select pin {} not found".format(sp_name))
+                continue
+            dio = digitalio.DigitalInOut(sp)
+            dio.direction = digitalio.Direction.OUTPUT
+            dio.value = False
+            self.select_pins.append(dio)
+        self.num_select = len(self.select_pins)
+
+        # Set up mux A
+        mux_a_cfg = mux_config.get("mux_a", {})
+        self.adc_a = None
+        self.en_a = None
+        a_pin = getattr(board, mux_a_cfg.get("analog_pin", "GP26"), None)
+        if a_pin:
+            self.adc_a = analogio.AnalogIn(a_pin)
+        a_en = getattr(board, mux_a_cfg.get("enable_pin", "GP14"), None)
+        if a_en:
+            self.en_a = digitalio.DigitalInOut(a_en)
+            self.en_a.direction = digitalio.Direction.OUTPUT
+            self.en_a.value = True  # disabled (active low)
+
+        # Set up mux B
+        mux_b_cfg = mux_config.get("mux_b", {})
+        self.adc_b = None
+        self.en_b = None
+        b_pin = getattr(board, mux_b_cfg.get("analog_pin", "GP27"), None)
+        if b_pin:
+            self.adc_b = analogio.AnalogIn(b_pin)
+        b_en = getattr(board, mux_b_cfg.get("enable_pin", "GP15"), None)
+        if b_en:
+            self.en_b = digitalio.DigitalInOut(b_en)
+            self.en_b.direction = digitalio.Direction.OUTPUT
+            self.en_b.value = True  # disabled
+
+        mux_a_name = mux_a_cfg.get("analog_pin", "GP26")
+        mux_b_name = mux_b_cfg.get("analog_pin", "GP27")
+        print("Mux scan: A={}, B={}, threshold={}, settle={}us".format(
+            mux_a_name, mux_b_name, self.threshold, self.settle_us))
+
+        # Build pad list from pads config
+        for pad_cfg in pads_config:
+            note_id = pad_cfg.get("note", "")
+            mux_id = pad_cfg.get("mux", "a").lower()
+            channel = pad_cfg.get("channel", 0)
+
+            note_info = find_note(note_id, by_name, by_idx, by_midi)
+            if note_info is None:
+                print("WARNING: Note {} not in layout".format(note_id))
+                continue
+
+            self.pads.append({
+                "note": note_info,
+                "mux": mux_id,
+                "channel": channel,
+                "was_active": False,
+            })
+
+        print("Configured {} pads ({} on mux A, {} on mux B)".format(
+            len(self.pads),
+            sum(1 for p in self.pads if p["mux"] == "a"),
+            sum(1 for p in self.pads if p["mux"] == "b"),
+        ))
+
+    def _set_channel(self, channel):
+        """Set mux select pins to address a channel."""
+        for i in range(self.num_select):
+            self.select_pins[i].value = bool(channel & (1 << i))
+
+    def _enable_mux(self, mux_id):
+        """Enable one mux, disable the other."""
+        if self.en_a:
+            self.en_a.value = (mux_id != "a")  # active low
+        if self.en_b:
+            self.en_b.value = (mux_id != "b")
+
+    def _read_channel(self, mux_id, channel):
+        """Read raw ADC value from a specific mux and channel."""
+        self._enable_mux(mux_id)
+        self._set_channel(channel)
+        # Settle time (use sleep for microsecond-range delays)
+        time.sleep(self.settle_us / 1_000_000)
+
+        if mux_id == "a" and self.adc_a:
+            return self.adc_a.value
+        elif mux_id == "b" and self.adc_b:
+            return self.adc_b.value
+        return 0
+
+    def _raw_to_velocity(self, raw):
+        """Map raw ADC value above threshold to velocity 1-127."""
+        # Scale the range from threshold..65535 to 1..127
+        above = raw - self.threshold
+        max_range = 65535 - self.threshold
+        if max_range <= 0:
+            return 100
+        velocity = int((above / max_range) * 126) + 1
+        return max(1, min(127, velocity))
+
+    def scan(self):
+        """Scan all pads through both muxes.
+
+        Returns (pressed_notes, released_notes). Each pressed note dict
+        has a "velocity" key derived from the analog reading.
+        """
+        pressed = []
+        released = []
+
+        for pad in self.pads:
+            raw = self._read_channel(pad["mux"], pad["channel"])
+            is_active = raw > self.threshold
+
+            if is_active and not pad["was_active"]:
+                vel = self._raw_to_velocity(raw)
+                note_with_vel = dict(pad["note"])
+                note_with_vel["velocity"] = vel
+                pressed.append(note_with_vel)
+            elif not is_active and pad["was_active"]:
+                released.append(pad["note"])
+
+            pad["was_active"] = is_active
+
+        # Disable both muxes after scan
+        if self.en_a:
+            self.en_a.value = True
+        if self.en_b:
+            self.en_b.value = True
+
+        return pressed, released
+
+    @property
+    def count(self):
+        return len(self.pads)
+
+
 # ---------------------------------------------------------------------------
 # Demo / test modes
 # ---------------------------------------------------------------------------
@@ -732,8 +920,9 @@ def main():
         player = TonePlayer(audio_pin)
         player.load_all(notes)
 
-    # If no input pins configured, run demos
-    if not pin_map:
+    # If no input pins/pads configured, run demos
+    pads_list = hw_config.get("pads", [])
+    if not pin_map and not pads_list:
         print("\nNo input pins in pan_layout.json 'hardware.pins'")
         print("Running demo...")
         print("(Configure pins to map GPIO -> notes for interactive play)")
@@ -749,13 +938,9 @@ def main():
             led.value = False
 
         print("Demo finished. Add 'hardware' config to pan_layout.json.")
-        print("For button mode:")
-        print('  "input_mode": "button",')
-        print('  "pins": {"GP0": "C4", "GP1": "D4"}')
-        print("For mux_touch mode (velocity-sensitive):")
-        print('  "input_mode": "mux_touch",')
-        print('  "mux": {"analog_pin":"GP26", "select_pins":["GP10","GP11","GP12","GP13"]},')
-        print('  "pins": {"GP0": {"note":"C4","mux_channel":0}}')
+        print("For full 29-pad tenor pan, use mux_scan mode:")
+        print('  "input_mode": "mux_scan"')
+        print("  See pan_layout.json for complete configuration.")
 
         # Idle blink
         while True:
@@ -764,7 +949,11 @@ def main():
             time.sleep(1)
 
     # Set up inputs
-    if input_mode == "mux_touch":
+    if input_mode == "mux_scan":
+        mux_config = hw_config.get("mux", {})
+        pads_config = hw_config.get("pads", [])
+        inputs = MuxScanInput(notes, mux_config, pads_config)
+    elif input_mode == "mux_touch":
         mux_config = hw_config.get("mux", {})
         inputs = MuxTouchInput(pin_map, notes, mux_config)
     elif input_mode == "touch":

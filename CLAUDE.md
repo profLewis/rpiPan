@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-rpiPan is a CircuitPython steel pan instrument for the Raspberry Pi Pico. It reads a JSON layout file (`pan_layout.json`) to configure notes and hardware, plays WAV samples with polyphonic mixing, and supports velocity-sensitive touch input via an analog multiplexer.
+rpiPan is a CircuitPython steel pan instrument. Designed for the Raspberry Pi Pico / Pico 2 but works on any board with CircuitPython support (ESP32-S3, Arduino RP2040, etc.). Reads a JSON layout file (`pan_layout.json`) to configure notes and hardware, plays WAV samples with polyphonic mixing, and supports velocity-sensitive touch input via analog multiplexers. All pin names come from the JSON config, so no code changes needed when switching boards.
 
 Companion project to [panipuri](https://github.com/profLewis/paniPuri) (desktop Python version).
 
@@ -25,7 +25,8 @@ Both expose the same interface: `note_on(midi, velocity)`, `note_off(midi)`, `al
 
 - **`ButtonInput`** — Digital GPIO with pull-up, active low. Returns notes with no velocity (defaults to 100).
 - **`TouchInput`** — Capacitive touch via `touchio`. Returns notes with no velocity.
-- **`MuxTouchInput`** — Digital trigger + analog velocity via CD74HC4067 multiplexer. Select pins address the mux channel, ADC reads 0–3.3V, maps linearly to velocity 1–127. Returns notes with `"velocity"` key.
+- **`MuxTouchInput`** — Digital trigger + analog velocity via CD74HC4067 multiplexer. Select pins address the mux channel, ADC reads 0–3.3V, maps linearly to velocity 1–127. Returns notes with `"velocity"` key. Good for up to ~20 pads.
+- **`MuxScanInput`** — Pure analog scanning via 2x CD74HC4067 with enable pins. No digital trigger pins needed — threshold crossing on the analog reading triggers notes, magnitude gives velocity. Supports all 29 pads using only 9 GPIO pins. Configured via `"pads"` array (not `"pins"` dict).
 
 All expose: `scan()` → `(pressed_list, released_list)`, `.count` property.
 

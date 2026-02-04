@@ -1,6 +1,6 @@
 # rpiPan
 
-A steel pan instrument for the Raspberry Pi Pico running CircuitPython. Plays real WAV samples from the [panipuri](https://github.com/profLewis/paniPuri) project with polyphonic playback and velocity-sensitive touch input via an analog multiplexer.
+A steel pan instrument running CircuitPython. Designed for the Raspberry Pi Pico / Pico 2 but works on any CircuitPython-compatible board (ESP32-S3, Arduino RP2040, etc.). Plays real WAV samples from the [panipuri](https://github.com/profLewis/paniPuri) project with polyphonic playback and velocity-sensitive touch input via analog multiplexers. All 29 notes of a tenor pan using only 9 GPIO pins.
 
 ## Features
 
@@ -9,15 +9,16 @@ A steel pan instrument for the Raspberry Pi Pico running CircuitPython. Plays re
 - **Velocity-sensitive input** — analog multiplexer reads strike force (0–3.3V) and maps it to MIDI velocity 1–127
 - **JSON-driven configuration** — `pan_layout.json` defines note layout, pin assignments, mux wiring, and audio settings
 - **Tenor pan range** — C4 to E6, 29 notes across 3 concentric rings (outer/central/inner)
-- **Three input modes** — digital buttons, capacitive touch, or mux-based touch with analog velocity
+- **Four input modes** — digital buttons, capacitive touch, mux-based touch with analog velocity, or full analog scan (29 pads, 9 pins)
+- **Board-agnostic** — pin names in JSON config, works on Pico, Pico 2, Pico W, ESP32-S3, Arduino RP2040
 - **Automatic install** — `install.py` converts samples and deploys to the Pico
 
 ## Hardware
 
-- Raspberry Pi Pico (RP2040) running CircuitPython
-- Speaker or amplifier on GP18 (PWM audio output)
-- Touch pads with FSR (Force Sensitive Resistor) for velocity sensing
-- CD74HC4067 16-channel analog multiplexer for reading FSR voltages
+- Raspberry Pi Pico / Pico 2 (or any CircuitPython board)
+- 4W speaker via class-D amplifier (e.g. PAM8403) on GP18
+- 29 FSR (Force Sensitive Resistor) touch pads
+- 2x CD74HC4067 16-channel analog multiplexers
 - See [WIRING.md](WIRING.md) for the full wiring diagram
 
 ## Quick Start
@@ -77,9 +78,28 @@ All configuration lives in `pan_layout.json`. The `"notes"` section defines the 
 
 | Mode | `input_mode` | Description |
 |------|-------------|-------------|
+| Mux Scan | `"mux_scan"` | Full 29-pad scan via 2 muxes. Analog threshold triggers, magnitude = velocity. 9 pins. |
+| Mux Touch | `"mux_touch"` | Digital trigger + analog velocity via single mux. Up to ~20 pads. |
 | Button | `"button"` | Digital GPIO pins with internal pull-up, active low. Fixed velocity. |
 | Touch | `"touch"` | Capacitive touch via `touchio`. Fixed velocity. |
-| Mux Touch | `"mux_touch"` | Digital trigger + analog velocity via multiplexer. |
+
+**Mux scan mode** — full 29-pad tenor pan, velocity-sensitive, only 9 GPIO pins:
+
+```json
+"input_mode": "mux_scan",
+"mux": {
+  "select_pins": ["GP10", "GP11", "GP12", "GP13"],
+  "mux_a": {"analog_pin": "GP26", "enable_pin": "GP14"},
+  "mux_b": {"analog_pin": "GP27", "enable_pin": "GP15"},
+  "threshold": 3000,
+  "settle_us": 100
+},
+"pads": [
+  {"note": "C4", "mux": "a", "channel": 0},
+  {"note": "C#4", "mux": "a", "channel": 1},
+  ...
+]
+```
 
 **Button mode** — simplest wiring, each pad is a switch to GND:
 
