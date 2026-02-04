@@ -319,7 +319,7 @@ def install(drive_path, source_dir, dry_run=False, convert_only=False,
     if dry_run:
         print("  Would copy: code.py")
     else:
-        shutil.copy2(code_path, dst)
+        shutil.copy(code_path, dst)
         print("  code.py ({:.0f} KB)".format(os.path.getsize(dst) / 1024))
 
     # 2. Copy pan_layout.json
@@ -327,7 +327,7 @@ def install(drive_path, source_dir, dry_run=False, convert_only=False,
     if dry_run:
         print("  Would copy: pan_layout.json")
     else:
-        shutil.copy2(layout_path, dst)
+        shutil.copy(layout_path, dst)
         print("  pan_layout.json ({:.0f} KB)".format(os.path.getsize(dst) / 1024))
 
     # 3. Copy converted sounds/
@@ -347,7 +347,7 @@ def install(drive_path, source_dir, dry_run=False, convert_only=False,
         if dry_run:
             print("  Would copy: sounds/{}".format(fname))
         else:
-            shutil.copy2(src, dst)
+            shutil.copy(src, dst)
             sz = os.path.getsize(dst)
             total_size += sz
         copied += 1
