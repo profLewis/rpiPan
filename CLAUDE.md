@@ -11,7 +11,8 @@ Companion project to [panipuri](https://github.com/profLewis/paniPuri) (desktop 
 ### MicroPython (default)
 
 - **`main_mp.py`** — Main MicroPython program. Deployed as `main.py` on the Pico. All classes and logic in one file. Software audio mixing with I2S output via `machine.I2S`. Inline ADS1115 driver (no external libraries).
-- **`test_hw_mp.py`** — MicroPython hardware diagnostic. Deployed as `test_hw.py`.
+- **`test_hw_mp.py`** — MicroPython hardware diagnostic. Deployed as `test_hw.py`. Tests: board detection, I2S audio (sine tones), ADS1115 ADC, mux scan, GPIO survey, WAV playback (sequential all notes + polyphonic chords with stagger). All I2C errors reported but don't stop the test run.
+- **`diskinfo_mp.py`** — Disk space utility. Deployed as `diskinfo.py`. Lists free/used space and all files with sizes. Can run via `mpremote run diskinfo_mp.py` without copying.
 
 ### CircuitPython (alternative)
 
@@ -20,7 +21,7 @@ Companion project to [panipuri](https://github.com/profLewis/paniPuri) (desktop 
 
 ### Shared
 
-- **`install.py`** — Desktop Python script. Converts panipuri WAV samples (44100 Hz stereo -> 22050 Hz mono) and deploys. `--platform micropython` (default) stages files; `--platform circuitpython` copies to CIRCUITPY drive. Uses only stdlib.
+- **`install.py`** — Desktop Python script. Converts panipuri WAV samples (44100 Hz stereo -> 22050 Hz mono) and deploys. `--platform micropython` (default) stages files and trims WAVs to fit 1 MB (`--max-sounds-mb`); auto-uploads via mpremote (installs if needed), cleans old files on Pico first (preserves `.txt`). `--platform circuitpython` copies to CIRCUITPY drive. Uses only stdlib.
 - **`pan_layout.json`** — Combined note layout + hardware configuration. Same format for both platforms.
 
 ## main_mp.py Structure (MicroPython)
@@ -62,13 +63,22 @@ Companion project to [panipuri](https://github.com/profLewis/paniPuri) (desktop 
 - **`ButtonInput`** — `machine.Pin(n, Pin.IN, Pin.PULL_UP)`, `.value()` method.
 - **`MuxTouchInput`** — Digital trigger + mux analog read via inline ADS1115.
 - **`MuxScanInput`** — Dual mux scanning via ADS1115, shared select + enable pins.
+- **`StdinReader`** — Non-blocking serial input via `select.poll()`. Reads note names from stdin.
 - No `TouchInput` — MicroPython lacks `touchio`. Falls back to button mode.
+- All I2C reads catch `OSError` (EIO) gracefully — return 0 / default velocity instead of crashing.
 
 All expose: `scan()` -> `(pressed_list, released_list)`, `.count` property.
 
+### Serial Note Input
+
+- `parse_note_input(text)` — Case-insensitive parser: `c#4`, `Cs4`, `eb5`, `FS5` all work.
+- `StdinReader` — Uses `select.poll()` with `sys.stdin` for non-blocking character accumulation.
+- Active in both demo mode (idle loop) and hardware pad mode (main scan loop).
+- Accepts: note name with octave (`C4`, `F#5`), sharps as `#` or `s`, flats as `b`.
+
 ### Threading Model
 
-- **Core 0** (main thread): Input scanning at 50 Hz. Sends note commands via lock-protected queue.
+- **Core 0** (main thread): Input scanning + stdin polling at 50 Hz. Sends note commands via lock-protected queue.
 - **Core 1** (audio thread via `_thread`): Mixing loop. Reads WAV chunks, mixes, writes to I2S.
 - Communication: `_pending_on` / `_pending_off` lists protected by `_thread.allocate_lock()`.
 
@@ -132,6 +142,7 @@ Both expose: `note_on(midi, velocity)`, `note_off(midi)`, `all_off()`, `load_all
 ```
 main_mp.py           # MicroPython main (deployed as main.py)
 test_hw_mp.py        # MicroPython diagnostic (deployed as test_hw.py)
+diskinfo_mp.py       # MicroPython disk space utility (deployed as diskinfo.py)
 code.py              # CircuitPython main (deployed as code.py)
 test_hw.py           # CircuitPython diagnostic
 install.py           # Desktop: convert samples + deploy to Pico

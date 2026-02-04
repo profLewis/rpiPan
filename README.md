@@ -296,6 +296,7 @@ The 29 tenor pan notes are arranged across 3 concentric rings:
 5. On touch: the mux reads the analog voltage, maps it to velocity, and queues a `note_on`
 6. The mixer reads PCM data from active voices, mixes with fixed-point volume, and writes to I2S
 7. Notes decay naturally — no explicit `note_off` needed (like a real steel pan)
+8. You can also type note names via the serial console (e.g. `C4`, `c#4`, `Eb5`, `fs5`) to play notes — works in both demo mode and with hardware pads connected
 
 ### CircuitPython
 
@@ -310,6 +311,7 @@ The 29 tenor pan notes are arranged across 3 concentric rings:
 |------|-------------|
 | `main_mp.py` | MicroPython main program (deployed as `main.py`) |
 | `test_hw_mp.py` | MicroPython hardware diagnostic (deployed as `test_hw.py`) |
+| `diskinfo_mp.py` | MicroPython disk space utility (deployed as `diskinfo.py`) |
 | `code.py` | CircuitPython main program |
 | `test_hw.py` | CircuitPython hardware diagnostic |
 | `pan_layout.json` | Note layout + hardware configuration (shared) |

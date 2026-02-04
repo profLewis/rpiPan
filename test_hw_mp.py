@@ -533,11 +533,14 @@ def _play_wav_stream(i2s, path, max_seconds=0):
     return True
 
 
-def _mix_wav_files(i2s, paths, max_seconds=2):
-    """Mix multiple WAV files and stream to I2S (software polyphony)."""
+def _mix_wav_files(i2s, paths, max_seconds=2, stagger_ms=80):
+    """Mix multiple WAV files and stream to I2S (software polyphony).
+
+    stagger_ms: delay between each voice starting (like strumming a chord).
+    """
     # Open all files, skip headers
     voices = []
-    for path in paths:
+    for idx, path in enumerate(paths):
         hdr = _read_wav_header(path)
         if hdr is None:
             continue
@@ -546,7 +549,9 @@ def _mix_wav_files(i2s, paths, max_seconds=2):
         f.read(data_offset)
         if max_seconds > 0:
             data_len = min(data_len, int(max_seconds * sample_rate * 2))
-        voices.append({"file": f, "remaining": data_len})
+        # Delay in samples: voice N starts N * stagger_ms later
+        delay_samples = int(idx * stagger_ms * sample_rate / 1000)
+        voices.append({"file": f, "remaining": data_len, "delay": delay_samples})
 
     if not voices:
         return False
@@ -565,6 +570,11 @@ def _mix_wav_files(i2s, paths, max_seconds=2):
 
         active = 0
         for v in voices:
+            # Count down delay before this voice starts
+            if v["delay"] > 0:
+                v["delay"] -= chunk_samples
+                active += 1  # still pending, keep loop alive
+                continue
             if v["remaining"] <= 0:
                 continue
             to_read = min(chunk_bytes, v["remaining"])
