@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
 """
-install.py - Convert WAV samples and install rpiPan to a Pico.
+install.py - Prepare, convert, and install rpiPan to a Pico.
 
-Converts panipuri's 44100 Hz stereo WAV files to 16-bit mono 22050 Hz,
-then deploys to the Pico. Supports both MicroPython (default) and
-CircuitPython platforms.
+Downloads WAV samples from urbanPan (or pitch-shifts from lower octaves),
+converts to 16-bit mono 22050 Hz, then deploys to the Pico. Supports both
+MicroPython (default) and CircuitPython platforms.
+
+Sound preparation follows panipuri's cascading fallback approach:
+  1. Already exists in source directory
+  2. Download from urbanPan GitHub repo (layer 2, forte)
+  3. Pitch-shift from an octave-below sample
+No external dependencies — uses only Python stdlib.
 
 Usage:
-    python install.py                          # MicroPython (default), stages files
+    python install.py                          # Download + convert + deploy (MicroPython)
     python install.py --platform circuitpython /Volumes/CIRCUITPY  # CircuitPython
-    python install.py --source ../panipuri/sounds  # Custom source directory
+    python install.py --source ../panipuri/sounds  # Use existing sounds directory
+    python install.py --prepare-only           # Just download/prepare source sounds
     python install.py --dry-run                # Show what would be done
-    python install.py --convert-only           # Just convert, don't copy
+    python install.py --convert-only           # Just convert, don't deploy
+    python install.py --no-download            # Skip downloading, use existing only
     python install.py --platform circuitpython --libs  # Also install CP libraries
     python install.py --platform circuitpython --libs-only /Volumes/CIRCUITPY
 """
@@ -47,7 +55,7 @@ elif sys.platform == "win32":
 else:
     DEFAULT_DRIVE = "/media/{}/CIRCUITPY".format(os.environ.get("USER", "pi"))
 
-DEFAULT_SOURCE = os.path.join(SCRIPT_DIR, "..", "panipuri", "sounds")
+DEFAULT_SOURCE = os.path.join(SCRIPT_DIR, "sounds_source")
 
 # Target sample rate for Pico (22050 Hz mono is a good balance of
 # quality vs. CPU/RAM on the RP2040)
@@ -200,6 +208,258 @@ def trim_wav(src_path, dst_path, max_samples, fade_samples=1102):
 
 
 # ---------------------------------------------------------------------------
+# Sound preparation (download from urbanPan / pitch-shift)
+# ---------------------------------------------------------------------------
+
+# urbanPan GitHub raw URL for forte (layer 2) samples
+URBANPAN_BASE_URL = (
+    "https://raw.githubusercontent.com/urbansmash/urbanPan/master/urbanPan/Samples"
+)
+
+# Note name -> urbanPan filename component (sharps use uppercase S)
+NAME_TO_URBANPAN = {
+    "C": "C", "C#": "CS", "Db": "CS",
+    "D": "D", "D#": "DS", "Eb": "DS",
+    "E": "E",
+    "F": "F", "F#": "FS", "Gb": "FS",
+    "G": "G", "G#": "GS", "Ab": "GS",
+    "A": "A", "A#": "AS", "Bb": "AS",
+    "B": "B",
+}
+
+# Note name -> filename-safe name (sharps use lowercase s)
+NAME_TO_FILESAFE = {
+    "C": "C", "C#": "Cs", "Db": "Cs",
+    "D": "D", "D#": "Ds", "Eb": "Ds",
+    "E": "E",
+    "F": "F", "F#": "Fs", "Gb": "Fs",
+    "G": "G", "G#": "Gs", "Ab": "Gs",
+    "A": "A", "A#": "As", "Bb": "As",
+    "B": "B",
+}
+
+
+def sound_filename(name, octave):
+    """Get the output filename for a note (e.g. 'Fs4.wav')."""
+    safe = NAME_TO_FILESAFE.get(name, name.replace("#", "s"))
+    return "{}{}.wav".format(safe, octave)
+
+
+def urbanpan_filename(name, octave):
+    """Get the urbanPan sample filename (e.g. '2-FS4.wav')."""
+    up = NAME_TO_URBANPAN.get(name)
+    if up is None:
+        return None
+    return "2-{}{}.wav".format(up, octave)
+
+
+def download_urbanpan(name, octave, dest_path):
+    """Download a forte sample from urbanPan GitHub. Returns True on success."""
+    if not HAS_URLLIB:
+        return False
+    fname = urbanpan_filename(name, octave)
+    if fname is None:
+        return False
+    url = "{}/{}".format(URBANPAN_BASE_URL, fname)
+    try:
+        req = Request(url, headers={"User-Agent": "rpiPan-installer"})
+        resp = urlopen(req, timeout=30)
+        with open(dest_path, "wb") as f:
+            f.write(resp.read())
+        return True
+    except Exception:
+        return False
+
+
+def pitch_shift_octave_up(src_path, dest_path):
+    """Shift a WAV file up one octave by resampling to half length.
+
+    Reads the source WAV, averages adjacent sample pairs (anti-alias),
+    and writes at the same sample rate with half the samples.
+    Stdlib only (wave + struct). Handles mono and stereo input.
+    Returns True on success.
+    """
+    try:
+        with wave.open(src_path, "rb") as src:
+            src_rate = src.getframerate()
+            channels = src.getnchannels()
+            width = src.getsampwidth()
+            n_frames = src.getnframes()
+            raw = src.readframes(n_frames)
+    except Exception:
+        return False
+
+    # Decode to 16-bit samples
+    if width == 2:
+        n_samples = len(raw) // 2
+        samples = list(struct.unpack("<{}h".format(n_samples), raw))
+    elif width == 1:
+        samples = [(b - 128) * 256 for b in raw]
+    elif width == 3:
+        samples = []
+        for i in range(0, len(raw), 3):
+            val = raw[i] | (raw[i + 1] << 8) | (raw[i + 2] << 16)
+            if val >= 0x800000:
+                val -= 0x1000000
+            samples.append(val >> 8)
+    else:
+        return False
+
+    # Pitch-shift: average adjacent frame pairs (anti-alias + downsample)
+    samples_per_frame = channels
+    n_frame_pairs = len(samples) // (samples_per_frame * 2)
+
+    shifted = []
+    for i in range(n_frame_pairs):
+        base = i * samples_per_frame * 2
+        for ch in range(channels):
+            s1 = samples[base + ch]
+            s2 = samples[base + samples_per_frame + ch]
+            shifted.append((s1 + s2) // 2)
+
+    # Normalize to 82% peak to prevent clipping (matches panipuri)
+    if shifted:
+        peak = max(abs(s) for s in shifted)
+        target_peak = int(32767 * 0.82)
+        if peak > target_peak:
+            scale = target_peak / peak
+            shifted = [int(s * scale) for s in shifted]
+
+    # Write output at same sample rate
+    with wave.open(dest_path, "wb") as dst:
+        dst.setnchannels(channels)
+        dst.setsampwidth(2)
+        dst.setframerate(src_rate)
+        dst.writeframes(struct.pack("<{}h".format(len(shifted)), *shifted))
+
+    return True
+
+
+def prepare_source_sounds(layout_path, source_dir, force=False, dry_run=False,
+                          no_download=False):
+    """Download or generate source WAV files for all notes in the layout.
+
+    Cascading fallback (same approach as panipuri's prepare_sounds.py):
+      1. Already exists in source_dir
+      2. Download from urbanPan GitHub repo (layer 2, forte)
+      3. Pitch-shift from an octave-below sample
+
+    Uses only Python stdlib — no numpy or scipy needed.
+    Returns (available_filenames, stats_dict).
+    """
+    if not os.path.isfile(layout_path):
+        print("ERROR: pan_layout.json not found")
+        return [], {}
+
+    # Read layout to get needed notes
+    with open(layout_path, "r") as f:
+        data = json.load(f)
+
+    notes = data.get("notes", [])
+    if not notes:
+        print("ERROR: No notes found in layout")
+        return [], {}
+
+    if not dry_run:
+        os.makedirs(source_dir, exist_ok=True)
+
+    print("--- Preparing source sounds ---")
+    print("Source directory: {}".format(source_dir))
+    if no_download:
+        print("(Download disabled — using existing files only)")
+    print()
+
+    stats = {"exists": 0, "downloaded": 0, "shifted": 0, "failed": 0}
+    available = []
+    sym = {"exists": ".", "downloaded": "D", "shifted": "S", "failed": "!"}
+
+    for note in notes:
+        name = note["name"]
+        octave = note["octave"]
+        fname = sound_filename(name, octave)
+        dest = os.path.join(source_dir, fname)
+
+        # 1. Already exists
+        if os.path.isfile(dest) and not force:
+            size = os.path.getsize(dest) // 1024
+            print("  . {:3s}{}  {:10s}  exists ({} KB)".format(
+                name, octave, fname, size))
+            stats["exists"] += 1
+            available.append(fname)
+            continue
+
+        if no_download:
+            print("  ! {:3s}{}  {:10s}  missing (download disabled)".format(
+                name, octave, fname))
+            stats["failed"] += 1
+            continue
+
+        if dry_run:
+            print("  D {:3s}{}  {:10s}  would download".format(
+                name, octave, fname))
+            stats["downloaded"] += 1
+            available.append(fname)
+            continue
+
+        # 2. Download from urbanPan
+        if download_urbanpan(name, octave, dest):
+            size = os.path.getsize(dest) // 1024
+            print("  D {:3s}{}  {:10s}  downloaded ({} KB)".format(
+                name, octave, fname, size))
+            stats["downloaded"] += 1
+            available.append(fname)
+            continue
+
+        # 3. Pitch-shift from lower octave
+        lower_octave = octave - 1
+        lower_fname = sound_filename(name, lower_octave)
+        lower_path = os.path.join(source_dir, lower_fname)
+
+        # Try existing lower-octave file in source dir
+        shifted = False
+        if os.path.isfile(lower_path):
+            if pitch_shift_octave_up(lower_path, dest):
+                shifted = True
+
+        # Try downloading the lower octave, then shift
+        if not shifted:
+            tmp_path = os.path.join(source_dir, "_tmp_lower.wav")
+            if download_urbanpan(name, lower_octave, tmp_path):
+                if pitch_shift_octave_up(tmp_path, dest):
+                    shifted = True
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+        if shifted:
+            size = os.path.getsize(dest) // 1024
+            print("  S {:3s}{}  {:10s}  shifted from {}{}  ({} KB)".format(
+                name, octave, fname, name, lower_octave, size))
+            stats["shifted"] += 1
+            available.append(fname)
+            continue
+
+        print("  ! {:3s}{}  {:10s}  FAILED".format(name, octave, fname))
+        stats["failed"] += 1
+
+    # Summary
+    print()
+    parts = []
+    if stats["exists"]:
+        parts.append("{} already existed".format(stats["exists"]))
+    if stats["downloaded"]:
+        parts.append("{} downloaded".format(stats["downloaded"]))
+    if stats["shifted"]:
+        parts.append("{} pitch-shifted".format(stats["shifted"]))
+    if stats["failed"]:
+        parts.append("{} FAILED".format(stats["failed"]))
+    print("Prepared: {} notes ({})".format(len(available), ", ".join(parts)))
+
+    return available, stats
+
+
+# ---------------------------------------------------------------------------
 # Layout reading
 # ---------------------------------------------------------------------------
 
@@ -242,20 +502,49 @@ def get_needed_files(layout_path):
 # ---------------------------------------------------------------------------
 
 def convert_samples(source_dir, converted_dir, layout_path, target_rate,
-                    dry_run=False, force=False):
+                    dry_run=False, force=False, no_download=False):
     """Convert WAV samples from source to converted directory.
+
+    If the source directory is missing or incomplete, automatically
+    downloads sounds from urbanPan first.
 
     Returns (available_files, success) where available_files is a list
     of filenames that were converted (or already up to date).
     """
     source_dir = os.path.abspath(source_dir)
 
+    # Auto-prepare source sounds if directory is missing or incomplete
+    needs_prep = not os.path.isdir(source_dir)
+    if not needs_prep and os.path.isfile(layout_path):
+        needed = get_needed_files(layout_path)
+        existing = [f for f in needed
+                    if os.path.isfile(os.path.join(source_dir, f))]
+        if len(existing) < len(needed):
+            needs_prep = True
+
+    prepared_files = None
+    if needs_prep and not no_download:
+        print()
+        prepared_files, prep_stats = prepare_source_sounds(
+            layout_path, source_dir, force=force, dry_run=dry_run)
+        if not prepared_files:
+            print("ERROR: Could not prepare source sounds")
+            print("  Check your internet connection, or use --source to")
+            print("  point to an existing sounds directory.")
+            return [], False
+        print()
+
     # Validate source
     if not os.path.isdir(source_dir):
-        print("ERROR: Source sounds directory not found: {}".format(source_dir))
-        print("  Specify with --source, e.g.:")
-        print("    python install.py --source /path/to/panipuri/sounds")
-        return [], False
+        if dry_run and prepared_files:
+            # In dry-run mode, use the prepared file list directly
+            pass
+        else:
+            print("ERROR: Source sounds directory not found: {}".format(source_dir))
+            print("  Run without --no-download to auto-download from urbanPan,")
+            print("  or specify with --source, e.g.:")
+            print("    python install.py --source /path/to/panipuri/sounds")
+            return [], False
 
     if not os.path.isfile(layout_path):
         print("ERROR: pan_layout.json not found in {}".format(
@@ -265,14 +554,19 @@ def convert_samples(source_dir, converted_dir, layout_path, target_rate,
     needed = get_needed_files(layout_path)
     print("Notes in layout: {} WAV files needed".format(len(needed)))
 
-    available = []
-    missing = []
-    for fname in needed:
-        src = os.path.join(source_dir, fname)
-        if os.path.isfile(src):
-            available.append(fname)
-        else:
-            missing.append(fname)
+    # In dry-run with preparation, use the prepared list instead of filesystem
+    if dry_run and prepared_files and not os.path.isdir(source_dir):
+        available = [f for f in needed if f in prepared_files]
+        missing = [f for f in needed if f not in prepared_files]
+    else:
+        available = []
+        missing = []
+        for fname in needed:
+            src = os.path.join(source_dir, fname)
+            if os.path.isfile(src):
+                available.append(fname)
+            else:
+                missing.append(fname)
 
     if missing:
         print("WARNING: {} source files missing:".format(len(missing)))
@@ -296,16 +590,22 @@ def convert_samples(source_dir, converted_dir, layout_path, target_rate,
         src = os.path.join(source_dir, fname)
         dst = os.path.join(converted_dir, fname)
 
-        if os.path.isfile(dst) and not force:
+        # In dry-run with prepared files, source may not exist on disk yet
+        src_exists = os.path.isfile(src)
+
+        if src_exists and os.path.isfile(dst) and not force:
             src_mtime = os.path.getmtime(src)
             dst_mtime = os.path.getmtime(dst)
             if dst_mtime >= src_mtime:
                 skipped += 1
                 continue
 
-        src_size = os.path.getsize(src) / 1024
         if dry_run:
-            print("  Would convert: {} ({:.0f} KB)".format(fname, src_size))
+            if src_exists:
+                src_size = os.path.getsize(src) / 1024
+                print("  Would convert: {} ({:.0f} KB)".format(fname, src_size))
+            else:
+                print("  Would convert: {}".format(fname))
             converted += 1
             continue
 
@@ -668,7 +968,7 @@ def install_circuitpython(drive_path, converted_dir, available, layout_path,
 
 def install(drive_path, source_dir, platform="micropython", dry_run=False,
             convert_only=False, target_rate=TARGET_RATE, force=False,
-            max_sounds_bytes=MP_SOUNDS_MAX_BYTES):
+            max_sounds_bytes=MP_SOUNDS_MAX_BYTES, no_download=False):
     """Convert samples and install to Pico."""
 
     layout_path = os.path.join(SCRIPT_DIR, "pan_layout.json")
@@ -686,10 +986,10 @@ def install(drive_path, source_dir, platform="micropython", dry_run=False,
         print("  Target drive:   {}".format(drive_path))
     print()
 
-    # Convert samples
+    # Convert samples (auto-downloads from urbanPan if source is incomplete)
     available, success = convert_samples(
         source_dir, converted_dir, layout_path, target_rate,
-        dry_run=dry_run, force=force)
+        dry_run=dry_run, force=force, no_download=no_download)
 
     if not success:
         return False
@@ -959,7 +1259,7 @@ def main():
     )
     parser.add_argument(
         "--source", default=DEFAULT_SOURCE,
-        help="Path to panipuri sounds/ directory (default: {})".format(
+        help="Path to source sounds directory (default: {})".format(
             DEFAULT_SOURCE),
     )
     parser.add_argument(
@@ -990,6 +1290,14 @@ def main():
         "--max-sounds-mb", type=float, default=1.0,
         help="Max total size for WAV sounds in MB (default: 1.0)",
     )
+    parser.add_argument(
+        "--prepare-only", action="store_true",
+        help="Only download/prepare source sounds, don't convert or deploy",
+    )
+    parser.add_argument(
+        "--no-download", action="store_true",
+        help="Skip downloading from urbanPan, use existing source files only",
+    )
 
     args = parser.parse_args()
 
@@ -1009,7 +1317,16 @@ def main():
         success = install_libs(args.drive, dry_run=args.dry_run)
         sys.exit(0 if success else 1)
 
-    # Normal install (convert + deploy)
+    # Prepare source sounds only
+    if args.prepare_only:
+        layout_path = os.path.join(SCRIPT_DIR, "pan_layout.json")
+        source_dir = os.path.abspath(args.source)
+        prepared, stats = prepare_source_sounds(
+            layout_path, source_dir, force=args.force, dry_run=args.dry_run,
+            no_download=args.no_download)
+        sys.exit(0 if prepared else 1)
+
+    # Normal install (prepare + convert + deploy)
     success = install(
         drive_path=args.drive,
         source_dir=args.source,
@@ -1019,6 +1336,7 @@ def main():
         target_rate=args.rate,
         force=args.force,
         max_sounds_bytes=int(args.max_sounds_mb * 1024 * 1024),
+        no_download=args.no_download,
     )
 
     # Install CircuitPython libraries if requested

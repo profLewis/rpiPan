@@ -8,10 +8,12 @@ run it from Thonny (F5) or from the REPL:
 Tests:
     1. Board detection
     2. I2S audio output (test tones via Waveshare Pico-Audio)
-    3. ADS1115 I2C ADC (voltage readings on all 4 channels)
-    4. HW-178 mux scanning (all 29 pads, raw voltages)
-    5. GPIO pin state survey
-    6. WAV file check and playback
+    3. Stereo pan test (WAV notes panned L/R by position on the pan)
+    4. Direct input test (vibration sensors / Grove Shield)
+    5. ADS1115 I2C ADC (voltage readings on all 4 channels)
+    6. HW-178 mux scanning (all 29 pads, raw voltages)
+    7. GPIO pin state survey
+    8. WAV file check and playback (stereo)
 
 Results are printed to the serial console (Thonny Shell or mpremote).
 """
@@ -23,6 +25,7 @@ import array
 import struct
 import sys
 import os
+import json
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +57,74 @@ def failed(msg):
 
 def info(msg):
     print("  [INFO] {}".format(msg))
+
+
+# ---------------------------------------------------------------------------
+# Pan position helpers
+# ---------------------------------------------------------------------------
+
+_NOTE_TO_SEMI = {
+    "C": 0, "C#": 1, "Cs": 1, "Db": 1,
+    "D": 2, "D#": 3, "Ds": 3, "Eb": 3,
+    "E": 4, "Fb": 4,
+    "F": 5, "F#": 6, "Fs": 6, "Gb": 6,
+    "G": 7, "G#": 8, "Gs": 8, "Ab": 8,
+    "A": 9, "A#": 10, "As": 10, "Bb": 10,
+    "B": 11, "Cb": 11,
+}
+
+_SEMI_TO_FNAME = ["C", "Cs", "D", "Ds", "E", "F", "Fs", "G", "Gs", "A", "As", "B"]
+
+
+def note_to_filename(name, octave):
+    """Convert note name + octave to WAV filename stem. ('Eb', 5) -> 'Ds5'."""
+    semi = _NOTE_TO_SEMI.get(name, 0)
+    return "{}{}".format(_SEMI_TO_FNAME[semi], octave)
+
+
+def load_pan_positions():
+    """Load pan_layout.json and return dict mapping filename stems to pan (0.0=L, 1.0=R).
+
+    Pan position is derived from the angular position of each note around the
+    circular pan: sin(angle) maps to left-right.
+    """
+    try:
+        f = open("pan_layout.json", "r")
+        layout = json.load(f)
+        f.close()
+    except Exception:
+        return {}
+
+    positions = {}
+    for note in layout.get("notes", []):
+        name = note.get("name", "")
+        octave = note.get("octave", 4)
+        idx = note.get("idx", "")
+        if not idx or len(idx) < 2:
+            continue
+
+        ring = idx[0]
+        try:
+            pos = int(idx[1:])
+        except ValueError:
+            continue
+
+        if ring == "O":
+            ring_size = 12
+        elif ring == "C":
+            ring_size = 12
+        elif ring == "I":
+            ring_size = 5
+        else:
+            continue
+
+        angle = pos * 2.0 * math.pi / ring_size
+        pan = 0.5 + 0.5 * math.sin(angle)
+
+        fname = note_to_filename(name, octave)
+        positions[fname] = pan
+
+    return positions
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +326,133 @@ def test_i2s_audio():
 
 
 # ---------------------------------------------------------------------------
-# 3. ADS1115 I2C ADC test
+# 3. Direct input test (vibration sensors / Grove Shield)
+# ---------------------------------------------------------------------------
+
+def test_direct_input():
+    """Test direct GPIO input pads (vibration sensors, buttons, FSRs).
+
+    Reads pan_layout.json to find pads with a 'pin' field, sets up each
+    GPIO with pull-up, and runs a live scan for a few seconds so the user
+    can tap sensors and see responses.
+
+    Code design and testing: P. Lewis
+    """
+    divider("Direct Input Test")
+
+    # Load config
+    try:
+        f = open("pan_layout.json", "r")
+        layout = json.load(f)
+        f.close()
+    except Exception as e:
+        info("Could not load pan_layout.json: {}".format(e))
+        return True
+
+    hw = layout.get("hardware", {})
+    mode = hw.get("input_mode", "button")
+    pads_config = hw.get("pads", [])
+
+    # Filter pads that have a "pin" field (direct wiring)
+    direct_pads = [p for p in pads_config if p.get("pin")]
+    if not direct_pads:
+        info("No direct-wired pads found (pads need a 'pin' field)")
+        info("Current input_mode: '{}'. Set to 'direct' with pin mappings to test.".format(mode))
+        return True
+
+    info("Input mode: '{}'".format(mode))
+    info("Found {} direct-wired pads".format(len(direct_pads)))
+
+    # Set up ADS1115 for velocity (if any pad has adc_channel)
+    adc = None
+    has_adc_pads = any(p.get("adc_channel") is not None for p in direct_pads)
+    if has_adc_pads:
+        adc_config = hw.get("adc", {})
+        try:
+            sda = pin_num(adc_config.get("sda", "GP4"))
+            scl = pin_num(adc_config.get("scl", "GP5"))
+            i2c = machine.I2C(0, sda=machine.Pin(sda),
+                              scl=machine.Pin(scl), freq=400000)
+            adc = ADS1115(i2c)
+            passed("ADS1115 ready for velocity reads")
+        except Exception as e:
+            info("ADS1115 not available: {} (velocity will be fixed)".format(e))
+
+    # Set up GPIO pins
+    pins = []
+    for cfg in direct_pads:
+        note_id = cfg.get("note", "?")
+        pin_name = cfg.get("pin", "")
+        adc_ch = cfg.get("adc_channel")
+        try:
+            n = pin_num(pin_name)
+            pin = machine.Pin(n, machine.Pin.IN, machine.Pin.PULL_UP)
+            pins.append({
+                "pin": pin,
+                "pin_name": pin_name,
+                "note": note_id,
+                "adc_channel": adc_ch,
+                "triggered": False,
+            })
+        except Exception as e:
+            failed("{} ({}) init: {}".format(pin_name, note_id, e))
+
+    if not pins:
+        failed("No pins could be initialized")
+        return True
+
+    passed("{} GPIO pins configured".format(len(pins)))
+
+    # Initial state readout
+    print("\n  Initial pin states:")
+    print("  {:>6s}  {:>5s}  {:>5s}  {:>5s}".format(
+        "Pin", "Note", "State", "ADC"))
+    print("  " + "-" * 30)
+    for p in pins:
+        val = p["pin"].value()
+        state = "HIGH" if val else "LOW"
+        adc_str = "ch{}".format(p["adc_channel"]) if p["adc_channel"] is not None else "-"
+        print("  {:>6s}  {:>5s}  {:>5s}  {:>5s}".format(
+            p["pin_name"], p["note"], state, adc_str))
+
+    # Live scan for 5 seconds
+    info("Live scan: tap sensors now (5 seconds)...")
+    scan_ms = 5000
+    start = time.ticks_ms()
+    trigger_count = 0
+
+    while time.ticks_diff(time.ticks_ms(), start) < scan_ms:
+        for p in pins:
+            is_active = not p["pin"].value()  # active low
+            if is_active and not p["triggered"]:
+                # Newly triggered
+                vel_str = ""
+                if p["adc_channel"] is not None and adc:
+                    try:
+                        raw = adc.read_channel(p["adc_channel"])
+                        velocity = max(1, min(127, int((raw / 65535.0) * 126) + 1))
+                        vel_str = " vel={} (raw={})".format(velocity, raw)
+                    except OSError as e:
+                        vel_str = " adc_err={}".format(e)
+                print("    TRIGGER: {} ({}){}".format(
+                    p["pin_name"], p["note"], vel_str))
+                trigger_count += 1
+                p["triggered"] = True
+            elif not is_active and p["triggered"]:
+                p["triggered"] = False
+        time.sleep_ms(10)  # 100 Hz scan
+
+    if trigger_count == 0:
+        info("No triggers detected (sensors not connected or not tapped)")
+    else:
+        passed("{} triggers detected".format(trigger_count))
+
+    passed("Direct input test complete")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# 4. ADS1115 I2C ADC test
 # ---------------------------------------------------------------------------
 
 def test_ads1115():
@@ -315,7 +512,7 @@ def test_ads1115():
 
 
 # ---------------------------------------------------------------------------
-# 4. Mux scanning test
+# 5. Mux scanning test
 # ---------------------------------------------------------------------------
 
 def test_mux_scan():
@@ -428,7 +625,7 @@ def test_mux_scan():
 
 
 # ---------------------------------------------------------------------------
-# 5. GPIO pin survey
+# 6. GPIO pin survey
 # ---------------------------------------------------------------------------
 
 def test_gpio_survey():
@@ -486,7 +683,7 @@ def test_gpio_survey():
 
 
 # ---------------------------------------------------------------------------
-# 6. WAV file test
+# 7. WAV file test
 # ---------------------------------------------------------------------------
 
 def _read_wav_header(path):
@@ -505,38 +702,61 @@ def _read_wav_header(path):
     return channels, sample_rate, bits, 44, data_len
 
 
-def _play_wav_stream(i2s, path, max_seconds=0):
-    """Stream a WAV file to I2S. max_seconds=0 means play entire file."""
-    info = _read_wav_header(path)
-    if info is None:
+def _play_wav_stream(i2s, path, max_seconds=0, pan=0.5):
+    """Stream a WAV file to I2S with stereo panning.
+
+    pan: 0.0 = full left, 0.5 = center, 1.0 = full right.
+    Expects I2S to be initialized in STEREO mode.
+    """
+    hdr = _read_wav_header(path)
+    if hdr is None:
         return False
-    channels, sample_rate, bits, data_offset, data_len = info
+    channels, sample_rate, bits, data_offset, data_len = hdr
 
     f = open(path, "rb")
     f.read(data_offset)  # skip header
 
-    chunk_size = 4096
-    buf = bytearray(chunk_size)
+    chunk_samples = 512
+    read_buf = bytearray(chunk_samples * 2)  # mono: 2 bytes per sample
+    out_buf = bytearray(chunk_samples * 4)   # stereo: 4 bytes per frame
     total_read = 0
     if max_seconds > 0:
         max_bytes = int(max_seconds * sample_rate * (bits // 8) * channels)
         data_len = min(data_len, max_bytes)
 
+    left_vol = int((1.0 - pan) * 256)
+    right_vol = int(pan * 256)
+
     while total_read < data_len:
-        n = f.readinto(buf)
+        to_read = min(len(read_buf), data_len - total_read)
+        n = f.readinto(read_buf, to_read)
         if n is None or n == 0:
             break
-        i2s.write(buf[:n])
         total_read += n
+        n_samp = n // 2
+        for i in range(n_samp):
+            s = read_buf[i * 2] | (read_buf[i * 2 + 1] << 8)
+            if s >= 0x8000:
+                s -= 0x10000
+            l = (s * left_vol) >> 8
+            r = (s * right_vol) >> 8
+            j = i * 4
+            out_buf[j] = l & 0xFF
+            out_buf[j + 1] = (l >> 8) & 0xFF
+            out_buf[j + 2] = r & 0xFF
+            out_buf[j + 3] = (r >> 8) & 0xFF
+        i2s.write(out_buf[:n_samp * 4])
 
     f.close()
     return True
 
 
-def _mix_wav_files(i2s, paths, max_seconds=2, stagger_ms=80):
-    """Mix multiple WAV files and stream to I2S (software polyphony).
+def _mix_wav_files(i2s, paths, max_seconds=2, stagger_ms=80, pan_map=None):
+    """Mix multiple WAV files with stereo panning and stream to I2S.
 
     stagger_ms: delay between each voice starting (like strumming a chord).
+    pan_map: dict mapping filename stems to pan value (0.0=L, 1.0=R).
+             Expects I2S in STEREO mode.
     """
     # Open all files, skip headers
     voices = []
@@ -551,7 +771,17 @@ def _mix_wav_files(i2s, paths, max_seconds=2, stagger_ms=80):
             data_len = min(data_len, int(max_seconds * sample_rate * 2))
         # Delay in samples: voice N starts N * stagger_ms later
         delay_samples = int(idx * stagger_ms * sample_rate / 1000)
-        voices.append({"file": f, "remaining": data_len, "delay": delay_samples})
+        # Per-voice pan position
+        pan = 0.5
+        if pan_map:
+            stem = path.split("/")[-1].replace(".wav", "")
+            pan = pan_map.get(stem, 0.5)
+        left_vol = int((1.0 - pan) * 256)
+        right_vol = int(pan * 256)
+        voices.append({
+            "file": f, "remaining": data_len, "delay": delay_samples,
+            "lv": left_vol, "rv": right_vol,
+        })
 
     if not voices:
         return False
@@ -559,14 +789,16 @@ def _mix_wav_files(i2s, paths, max_seconds=2, stagger_ms=80):
     chunk_samples = 512
     chunk_bytes = chunk_samples * 2
     n_voices = len(voices)
-    mix_buf = array.array("h", [0] * chunk_samples)
+    mix_buf_l = array.array("h", [0] * chunk_samples)
+    mix_buf_r = array.array("h", [0] * chunk_samples)
     read_buf = bytearray(chunk_bytes)
-    out_buf = bytearray(chunk_bytes)
+    out_buf = bytearray(chunk_samples * 4)  # stereo output
 
     while True:
-        # Clear mix buffer
+        # Clear mix buffers
         for i in range(chunk_samples):
-            mix_buf[i] = 0
+            mix_buf_l[i] = 0
+            mix_buf_r[i] = 0
 
         active = 0
         for v in voices:
@@ -584,23 +816,39 @@ def _mix_wav_files(i2s, paths, max_seconds=2, stagger_ms=80):
                 continue
             v["remaining"] -= n
             active += 1
-            # Mix: decode 16-bit samples, add to mix buffer scaled by 1/n_voices
             n_samp = n // 2
+            lv = v["lv"]
+            rv = v["rv"]
             for i in range(n_samp):
                 s = read_buf[i * 2] | (read_buf[i * 2 + 1] << 8)
                 if s >= 0x8000:
                     s -= 0x10000
-                val = mix_buf[i] + s // n_voices
-                if val > 32767:
-                    val = 32767
-                elif val < -32768:
-                    val = -32768
-                mix_buf[i] = val
+                s_scaled = s // n_voices
+                val_l = mix_buf_l[i] + ((s_scaled * lv) >> 8)
+                if val_l > 32767:
+                    val_l = 32767
+                elif val_l < -32768:
+                    val_l = -32768
+                mix_buf_l[i] = val_l
+                val_r = mix_buf_r[i] + ((s_scaled * rv) >> 8)
+                if val_r > 32767:
+                    val_r = 32767
+                elif val_r < -32768:
+                    val_r = -32768
+                mix_buf_r[i] = val_r
 
         if active == 0:
             break
 
-        struct.pack_into("<{}h".format(chunk_samples), out_buf, 0, *mix_buf)
+        # Interleave L/R into stereo output
+        for i in range(chunk_samples):
+            l = mix_buf_l[i]
+            r = mix_buf_r[i]
+            j = i * 4
+            out_buf[j] = l & 0xFF
+            out_buf[j + 1] = (l >> 8) & 0xFF
+            out_buf[j + 2] = r & 0xFF
+            out_buf[j + 3] = (r >> 8) & 0xFF
         i2s.write(out_buf)
 
     for v in voices:
@@ -608,6 +856,106 @@ def _mix_wav_files(i2s, paths, max_seconds=2, stagger_ms=80):
 
     return True
 
+
+# ---------------------------------------------------------------------------
+# Stereo pan showcase test
+# ---------------------------------------------------------------------------
+
+def test_stereo():
+    divider("Stereo Pan Test")
+
+    pan_map = load_pan_positions()
+    if not pan_map:
+        info("Could not load pan positions from pan_layout.json")
+        return True
+
+    sounds_dir = "sounds"
+    try:
+        files = os.listdir(sounds_dir)
+    except OSError:
+        info("No sounds/ directory found")
+        return True
+
+    wav_files = sorted([f for f in files if f.endswith(".wav")])
+    if not wav_files:
+        info("No WAV files found")
+        return True
+
+    # Build list of (pan_value, path, note_name) sorted left to right
+    panned_notes = []
+    for fname in wav_files:
+        stem = fname.replace(".wav", "")
+        pan = pan_map.get(stem, 0.5)
+        panned_notes.append((pan, "{}/{}".format(sounds_dir, fname), stem))
+    panned_notes.sort()
+
+    info("Note positions (left=0.00, center=0.50, right=1.00):")
+    for pan, path, stem in panned_notes:
+        bar_pos = int(pan * 20)
+        bar = "." * bar_pos + "|" + "." * (20 - bar_pos)
+        print("    {:>5s}  {:.2f}  [{}]".format(stem, pan, bar))
+
+    # Init I2S in stereo mode
+    try:
+        i2s = machine.I2S(
+            0,
+            sck=machine.Pin(27),
+            ws=machine.Pin(28),
+            sd=machine.Pin(26),
+            mode=machine.I2S.TX,
+            bits=16,
+            format=machine.I2S.STEREO,
+            rate=22050,
+            ibuf=8192,
+        )
+        passed("I2S stereo initialized")
+    except Exception as e:
+        failed("I2S stereo init: {}".format(e))
+        return False
+
+    # Sweep notes from left to right
+    info("Sweeping notes from LEFT to RIGHT...")
+    for pan_val, path, stem in panned_notes:
+        if pan_val < 0.3:
+            pos = "L"
+        elif pan_val > 0.7:
+            pos = "R"
+        else:
+            pos = "C"
+        print("    {} ({})".format(stem, pos), end="")
+        ok = _play_wav_stream(i2s, path, max_seconds=0.6, pan=pan_val)
+        print(" OK" if ok else " FAIL")
+
+    passed("Stereo sweep complete")
+
+    # Play a panned chord
+    info("Stereo chord: C major spread across the pan...")
+    chord_stems = ["C4", "E4", "G4", "C5", "E5"]
+    chord_paths = []
+    for stem in chord_stems:
+        path = "{}/{}.wav".format(sounds_dir, stem)
+        try:
+            os.stat(path)
+            chord_paths.append(path)
+        except OSError:
+            pass
+    if chord_paths:
+        _mix_wav_files(i2s, chord_paths, max_seconds=2, stagger_ms=100, pan_map=pan_map)
+        passed("Stereo chord complete")
+
+    # Silence + cleanup
+    silence = bytearray(4096)
+    i2s.write(silence)
+    time.sleep(0.1)
+    i2s.deinit()
+
+    passed("Stereo pan test complete")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# WAV file test
+# ---------------------------------------------------------------------------
 
 def test_wav_files():
     divider("WAV File Check and Playback")
@@ -652,7 +1000,10 @@ def test_wav_files():
 
     passed("{} valid WAV files".format(len(valid_files)))
 
-    # Init I2S
+    # Load pan positions for stereo panning
+    pan_map = load_pan_positions()
+
+    # Init I2S in stereo mode
     try:
         i2s = machine.I2S(
             0,
@@ -661,7 +1012,7 @@ def test_wav_files():
             sd=machine.Pin(26),
             mode=machine.I2S.TX,
             bits=16,
-            format=machine.I2S.MONO,
+            format=machine.I2S.STEREO,
             rate=22050,
             ibuf=8192,
         )
@@ -669,14 +1020,15 @@ def test_wav_files():
         failed("I2S init for WAV playback: {}".format(e))
         return False
 
-    # --- Sequential playback: play all WAV files one after another ---
-    info("Sequential playback: all {} notes...".format(len(valid_files)))
+    # --- Sequential playback: play all WAV files with stereo panning ---
+    info("Sequential playback: all {} notes (stereo)...".format(len(valid_files)))
     for fname in valid_files:
         path = "{}/{}".format(sounds_dir, fname)
         name = fname.replace(".wav", "")
-        print("    {}".format(name), end="")
+        pan = pan_map.get(name, 0.5)
+        print("    {} (pan={:.2f})".format(name, pan), end="")
         try:
-            ok = _play_wav_stream(i2s, path)
+            ok = _play_wav_stream(i2s, path, pan=pan)
             if ok:
                 print(" OK")
             else:
@@ -685,8 +1037,8 @@ def test_wav_files():
             print(" ERROR: {}".format(e))
     passed("Sequential playback complete")
 
-    # --- Polyphonic playback: play chords using actual WAV samples ---
-    info("Polyphonic playback: chords from WAV samples...")
+    # --- Polyphonic playback: play chords with stereo panning ---
+    info("Polyphonic playback: chords with stereo panning...")
 
     # Build lookup of available files
     available = {}
@@ -710,7 +1062,7 @@ def test_wav_files():
         note_names = [n for n in notes if n in available]
         print("    {} ({})...".format(chord_name, " + ".join(note_names)), end="")
         try:
-            ok = _mix_wav_files(i2s, paths, max_seconds=2)
+            ok = _mix_wav_files(i2s, paths, max_seconds=2, pan_map=pan_map)
             if ok:
                 print(" OK")
             else:
@@ -751,16 +1103,23 @@ def main():
     results["i2s"] = test_i2s_audio()
     time.sleep(0.3)
 
-    # 3. ADS1115
+    # 3. Stereo pan test
+    results["stereo"] = test_stereo()
+    time.sleep(0.3)
+
+    # 4. Direct input test
+    results["direct"] = test_direct_input()
+
+    # 5. ADS1115
     results["ads1115"] = test_ads1115()
 
-    # 4. Mux scan
+    # 6. Mux scan
     results["mux"] = test_mux_scan()
 
-    # 5. GPIO survey
+    # 7. GPIO survey
     results["gpio"] = test_gpio_survey()
 
-    # 6. WAV files
+    # 8. WAV files
     results["wav"] = test_wav_files()
 
     # Summary

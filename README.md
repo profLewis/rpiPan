@@ -1,10 +1,10 @@
 # rpiPan
 
-A steel pan instrument for the Raspberry Pi Pico. Plays real WAV samples from the [panipuri](https://github.com/profLewis/paniPuri) project with polyphonic playback and velocity-sensitive touch input via analog multiplexers. All 29 notes of a tenor pan using only 9 GPIO pins. Supports MicroPython (default) and CircuitPython.
+A steel pan instrument for the Raspberry Pi Pico. Plays real WAV samples from the [urbanPan](https://github.com/urbansmash/urbanPan) Double Seconds pan project with polyphonic playback and velocity-sensitive touch input via analog multiplexers. All 29 notes of a tenor pan using only 9 GPIO pins. Supports MicroPython (default) and CircuitPython.
 
 ## Features
 
-- **Real steel pan samples** — uses WAV recordings from the [urbanPan](https://github.com/urbansmash/urbanPan) Double Seconds pan
+- **Real steel pan samples** — automatically downloads WAV recordings from the [urbanPan](https://github.com/urbansmash/urbanPan) Double Seconds pan
 - **Polyphonic playback** — 6 simultaneous voices with software mixing (MicroPython) or 8 voices via `audiomixer` (CircuitPython)
 - **Velocity-sensitive input** — analog multiplexer reads strike force (0-3.3V) and maps it to MIDI velocity 1-127
 - **JSON-driven configuration** — `pan_layout.json` defines note layout, pin assignments, mux wiring, and audio settings
@@ -15,13 +15,25 @@ A steel pan instrument for the Raspberry Pi Pico. Plays real WAV samples from th
 
 ## Hardware
 
-- Raspberry Pi Pico H (or Pico 2, Pico W)
-- Waveshare Pico-Audio HAT (I2S DAC, PCM5101A) — plugs onto Pico
-- ADS1115 I2C ADC breakout (16-bit, reads mux analog signals)
-- 2x HW-178 multiplexer modules (CD74HC4067 16-channel analog mux breakout)
-- 29 FSR (Force Sensitive Resistor) touch pads
-- 4W speaker (4-8 ohm) — connects to Pico-Audio speaker header
-- See [WIRING.md](WIRING.md) for the full wiring diagram
+### Full 29-pad setup (mux_scan mode)
+
+- [Raspberry Pi Pico H](https://thepihut.com/products/raspberry-pi-pico) (or [Pico 2](https://thepihut.com/products/raspberry-pi-pico-2), [Pico W](https://thepihut.com/products/raspberry-pi-pico-w))
+- [Waveshare Pico-Audio HAT](https://thepihut.com/products/pico-audio-audio-module-for-raspberry-pi-pico-inc-speakers) (I2S DAC, PCM5101A) — plugs onto Pico ([wiki](https://www.waveshare.com/wiki/Pico-Audio))
+- [ADS1115 I2C ADC breakout](https://thepihut.com/products/adafruit-ads1115-16-bit-adc-4-channel-with-programmable-gain-amplifier) (16-bit, reads mux analog signals) ([datasheet](https://www.ti.com/lit/ds/symlink/ads1115.pdf))
+- 2x [HW-178 multiplexer modules](https://www.amazon.co.uk/CD74HC4067-16-Channel-Digital-Multiplexer-Breakout/dp/B06Y1L95GK) (CD74HC4067 16-channel analog mux breakout)
+- 29x [FSR](https://thepihut.com/products/round-force-sensitive-resistor-fsr) (Force Sensitive Resistor) touch pads
+- Speakers included with Pico-Audio HAT (or any 4-8 ohm speaker)
+
+### Direct sensor setup (direct mode)
+
+- [Raspberry Pi Pico H](https://thepihut.com/products/raspberry-pi-pico) (or [Pico 2](https://thepihut.com/products/raspberry-pi-pico-2), [Pico W](https://thepihut.com/products/raspberry-pi-pico-w))
+- [Waveshare Pico-Audio HAT](https://thepihut.com/products/pico-audio-audio-module-for-raspberry-pi-pico-inc-speakers) (I2S DAC, PCM5101A) — plugs onto Pico
+- [Seeed Grove Shield for Pi Pico](https://thepihut.com/products/grove-shield-for-raspberry-pi-pico-v1-0) (optional, for easy wiring)
+- 7-15x [SW-420 vibration sensor modules](https://www.amazon.co.uk/DollaTek-SW-420-Vibration-Sensor-Arduino/dp/B07DJ5NVSC) or [FSRs](https://thepihut.com/products/round-force-sensitive-resistor-fsr)
+- [ADS1115 I2C ADC breakout](https://thepihut.com/products/adafruit-ads1115-16-bit-adc-4-channel-with-programmable-gain-amplifier) (optional, for velocity on up to 4 pads)
+- Speakers included with Pico-Audio HAT (or any 4-8 ohm speaker)
+
+See [WIRING.md](WIRING.md) for wiring diagrams for all configurations.
 
 ## Quick Start (MicroPython)
 
@@ -51,21 +63,21 @@ Flash the firmware:
 5. Select the correct USB serial port
 6. Click OK — you should see the MicroPython REPL (`>>>`) at the bottom
 
-### 3. Convert and Stage Files
+### 3. Download, Convert, and Stage Files
 
 ```bash
 # Clone the repo
 git clone https://github.com/profLewis/rpiPan.git
 cd rpiPan
 
-# Convert samples and stage for MicroPython (default)
+# Download sounds from urbanPan, convert, and stage for MicroPython
 python install.py
 
-# Or with explicit source path
+# Or use existing panipuri sounds instead of downloading
 python install.py --source ../panipuri/sounds
 ```
 
-This converts the panipuri WAV files (44100 Hz stereo) to Pico-friendly format (22050 Hz mono) and stages all files in `micropython_staging/`.
+This downloads WAV samples from the urbanPan GitHub repo (25 direct downloads + 4 pitch-shifted), converts them to Pico-friendly format (22050 Hz mono), and stages all files in `micropython_staging/`. No external dependencies needed — uses only Python stdlib.
 
 ### 4. Upload to Pico
 
@@ -139,10 +151,12 @@ The Pico restarts automatically and runs the demo.
 
 On startup, the main program detects the board type and applies sensible default pin assignments. Any settings in `pan_layout.json` override the defaults.
 
-| Board | I2S Pins | I2C Pins | Mux Select |
-|-------|----------|----------|------------|
-| Pico / Pico H / Pico 2 | GP26/27/28 | GP4/GP5 | GP10-13 |
-| Pico W | GP26/27/28 | GP4/GP5 | GP10-13 |
+| Board | I2S Pins | I2C Pins | Mux Select | Pinout |
+|-------|----------|----------|------------|--------|
+| Pico / Pico H | GP26/27/28 | GP4/GP5 | GP10-13 | [PDF](https://datasheets.raspberrypi.com/pico/Pico-R3-A4-Pinout.pdf) / [interactive](https://pico.pinout.xyz/) |
+| Pico 2 | GP26/27/28 | GP4/GP5 | GP10-13 | [PDF](https://datasheets.raspberrypi.com/pico/Pico-2-Pinout.pdf) / [interactive](https://pico2.pinout.xyz/) |
+| Pico W / WH | GP26/27/28 | GP4/GP5 | GP10-13 | [PDF](https://datasheets.raspberrypi.com/picow/PicoW-A4-Pinout.pdf) / [interactive](https://picow.pinout.xyz/) |
+| Pico 2 W | GP26/27/28 | GP4/GP5 | GP10-13 | [PDF](https://datasheets.raspberrypi.com/picow/pico-2-w-pinout.pdf) |
 
 For most Pico setups, the JSON `"hardware"` section only needs `input_mode` and `pads` — pin assignments are automatic.
 
@@ -187,6 +201,7 @@ All configuration lives in `pan_layout.json`. The `"notes"` section defines the 
 |------|-------------|-------------|
 | Mux Scan | `"mux_scan"` | Full 29-pad scan via 2 muxes. Analog threshold triggers, magnitude = velocity. 9 pins. |
 | Mux Touch | `"mux_touch"` | Digital trigger + analog velocity via single mux. Up to ~20 pads. |
+| Direct | `"direct"` | GPIO pins with pull-up + optional ADS1115 velocity. For vibration sensors (SW-420), FSRs, buttons via Grove Shield. No mux needed. Up to 15 pads. |
 | Button | `"button"` | Digital GPIO pins with internal pull-up, active low. Fixed velocity. |
 | Touch | `"touch"` | Capacitive touch via `touchio`. Fixed velocity. CircuitPython only. |
 
@@ -235,6 +250,19 @@ All configuration lives in `pan_layout.json`. The `"notes"` section defines the 
 }
 ```
 
+**Direct mode** — vibration sensors (SW-420) or FSRs wired directly to GPIO pins via Grove Shield. No mux needed. Up to 4 pads can read velocity via ADS1115:
+
+```json
+"input_mode": "direct",
+"adc": {"type": "i2c", "sda": "GP4", "scl": "GP5"},
+"pads": [
+  {"note": "C4",  "pin": "GP16", "adc_channel": 0},
+  {"note": "D4",  "pin": "GP17", "adc_channel": 1},
+  {"note": "E4",  "pin": "GP18"},
+  {"note": "F4",  "pin": "GP19"}
+]
+```
+
 ### Hardware Settings
 
 | Key | Default | Description |
@@ -260,20 +288,27 @@ Pin mappings accept notes in several formats:
 
 ## install.py
 
-Converts panipuri's WAV samples and deploys to the Pico.
+Downloads WAV samples from the urbanPan project, converts to Pico format, and deploys.
 
 ```bash
-python install.py                              # MicroPython (default), stages files
-python install.py --platform circuitpython /Volumes/CIRCUITPY  # CircuitPython
-python install.py --source ../panipuri/sounds  # Custom source directory
+python install.py                              # Download + convert + stage (MicroPython)
+python install.py --prepare-only               # Just download source sounds
+python install.py --source ../panipuri/sounds  # Use existing sounds directory
+python install.py --no-download                # Skip downloading, use existing only
 python install.py --convert-only               # Convert without deploying
 python install.py --dry-run                    # Preview without changes
-python install.py --force                      # Re-convert even if up to date
+python install.py --force                      # Re-download and re-convert all
 python install.py --rate 44100                 # Keep original sample rate
+python install.py --platform circuitpython /Volumes/CIRCUITPY  # CircuitPython
 python install.py --platform circuitpython --libs /Volumes/CIRCUITPY  # CP + libraries
 ```
 
-The converter uses only the Python standard library — no numpy or scipy required. Converted files are cached in `sounds_converted/` so subsequent runs are fast.
+Sound preparation follows the same cascading approach as [panipuri](https://github.com/profLewis/paniPuri)'s `prepare_sounds.py`:
+1. Check if the WAV already exists locally
+2. Download forte (layer 2) sample from [urbanPan](https://github.com/urbansmash/urbanPan)
+3. Download the octave-below sample and pitch-shift up
+
+Uses only the Python standard library — no numpy or scipy required. Source sounds are cached in `sounds_source/` and converted files in `sounds_converted/` so subsequent runs are fast.
 
 ## Pan Layout
 

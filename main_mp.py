@@ -708,6 +708,82 @@ class ButtonInput:
         return len(self.buttons)
 
 
+class DirectInput:
+    """Direct GPIO input with optional ADS1115 velocity.
+
+    Each pad connects a vibration sensor (or button/FSR) directly to a
+    GPIO pin — no multiplexer needed.  Pads with an adc_channel read
+    analog velocity from the ADS1115; pads without use fixed velocity.
+
+    Code design and testing: P. Lewis
+    """
+
+    def __init__(self, notes, pads_config, adc_config=None):
+        by_name, by_idx, by_midi = build_note_lookup(notes)
+        self.adc = None
+        if adc_config and adc_config.get("type") == "i2c":
+            try:
+                sda = pin_num(adc_config.get("sda", "GP4"))
+                scl = pin_num(adc_config.get("scl", "GP5"))
+                i2c = machine.I2C(0, sda=machine.Pin(sda),
+                                  scl=machine.Pin(scl), freq=400000)
+                self.adc = ADS1115(i2c)
+                print("  ADS1115 ready for velocity")
+            except Exception as e:
+                print("WARNING: ADS1115 init failed: {}".format(e))
+
+        self.pads = []
+        for cfg in pads_config:
+            note_id = cfg.get("note", "")
+            pin_name = cfg.get("pin", "")
+            adc_ch = cfg.get("adc_channel")
+            if not pin_name:
+                continue
+            note_info = find_note(note_id, by_name, by_idx, by_midi)
+            if note_info is None:
+                print("WARNING: Note {} not in layout".format(note_id))
+                continue
+            try:
+                pin = make_pin(pin_name, machine.Pin.IN,
+                               pull=machine.Pin.PULL_UP)
+                self.pads.append({
+                    "pin": pin,
+                    "pin_name": pin_name,
+                    "note": note_info,
+                    "adc_channel": adc_ch,
+                    "was_active": False,
+                })
+            except Exception as e:
+                print("WARNING: {} init failed: {}".format(pin_name, e))
+
+    def scan(self):
+        """Returns (pressed_notes, released_notes) lists."""
+        pressed = []
+        released = []
+        for pad in self.pads:
+            is_active = not pad["pin"].value()  # active low
+            if is_active and not pad["was_active"]:
+                note = dict(pad["note"])
+                if pad["adc_channel"] is not None and self.adc:
+                    try:
+                        raw = self.adc.read_channel(pad["adc_channel"])
+                        note["velocity"] = max(1, min(127,
+                            int((raw / 65535.0) * 126) + 1))
+                    except OSError:
+                        note["velocity"] = 100
+                else:
+                    note["velocity"] = 100
+                pressed.append(note)
+            elif not is_active and pad["was_active"]:
+                released.append(pad["note"])
+            pad["was_active"] = is_active
+        return pressed, released
+
+    @property
+    def count(self):
+        return len(self.pads)
+
+
 class MuxTouchInput:
     """Digital touch trigger + analog velocity via multiplexer.
 
@@ -964,6 +1040,27 @@ class MuxScanInput:
 # Demo / test modes
 # ---------------------------------------------------------------------------
 
+def play_startup_tune(player, notes):
+    """Play a short startup jingle using the loaded WAV samples."""
+    midi_map = {n["midi"]: n for n in notes}
+
+    # C major arpeggio up, then resolve: C4 E4 G4 C5 E5 C5
+    tune = [60, 64, 67, 72, 76, 72]
+    # Timing: short notes, last one held longer
+    durations = [0.12, 0.12, 0.12, 0.12, 0.15, 0.4]
+
+    playable = [(m, d) for m, d in zip(tune, durations) if m in midi_map]
+    if not playable:
+        return
+
+    print("  Startup tune...")
+    for midi, dur in playable:
+        player.note_on(midi, velocity=80)
+        time.sleep(dur)
+
+    time.sleep(0.3)
+
+
 def play_demo(player, notes, tempo_bpm=100):
     """Play through all notes to test audio output."""
     beat = 60.0 / tempo_bpm
@@ -1122,6 +1219,10 @@ def main():
     # Start audio thread on core 1
     engine.start()
     print("Audio thread started on core 1")
+    time.sleep(0.1)
+
+    # Startup tune
+    play_startup_tune(engine, notes)
 
     # Build note lookup for stdin input
     by_name, by_idx, by_midi = build_note_lookup(notes)
@@ -1184,6 +1285,9 @@ def main():
     elif input_mode == "mux_touch":
         mux_config = hw_config.get("mux", {})
         inputs = MuxTouchInput(pin_map, notes, mux_config, adc_config)
+    elif input_mode == "direct":
+        pads_config = hw_config.get("pads", [])
+        inputs = DirectInput(notes, pads_config, adc_config)
     elif input_mode == "touch":
         print("WARNING: Capacitive touch not available in MicroPython")
         print("  Falling back to button mode")
