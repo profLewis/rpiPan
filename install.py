@@ -600,9 +600,10 @@ def convert_samples(source_dir, converted_dir, layout_path, target_rate,
                 skipped += 1
                 continue
 
+        src_size = os.path.getsize(src) / 1024 if src_exists else 0
+
         if dry_run:
             if src_exists:
-                src_size = os.path.getsize(src) / 1024
                 print("  Would convert: {} ({:.0f} KB)".format(fname, src_size))
             else:
                 print("  Would convert: {}".format(fname))
