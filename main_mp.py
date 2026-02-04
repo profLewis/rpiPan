@@ -39,6 +39,7 @@ import array
 import machine
 import _thread
 import os
+import select
 
 
 # ---------------------------------------------------------------------------
@@ -599,6 +600,74 @@ def find_note(note_id, by_name, by_idx, by_midi):
     return by_name.get(note_id) or by_idx.get(note_id) or by_midi.get(note_id)
 
 
+def parse_note_input(text):
+    """Parse user input like 'c#4', 'Cs4', 'cs4', 'C#4', 'eb5' into (name, octave).
+
+    Case-insensitive. Accepts '#' or 's' for sharps, 'b' for flats.
+    Returns (canonical_name, octave) or None if unparseable.
+    """
+    text = text.strip()
+    if not text:
+        return None
+
+    # Try to split into note name and octave
+    # Last character(s) should be the octave digit
+    if not text[-1].isdigit():
+        return None
+
+    octave = int(text[-1])
+    name_part = text[:-1]
+
+    if not name_part:
+        return None
+
+    # Normalise: uppercase first letter, handle sharp/flat
+    letter = name_part[0].upper()
+    if letter not in "ABCDEFG":
+        return None
+
+    accidental = name_part[1:].lower()
+    if accidental in ("", ):
+        name = letter
+    elif accidental in ("#", "s"):
+        name = letter + "#"
+    elif accidental == "b":
+        name = letter + "b"
+    else:
+        return None
+
+    # Validate it's a real note name
+    if name not in NOTE_NAMES:
+        return None
+
+    return name, octave
+
+
+class StdinReader:
+    """Non-blocking line reader from stdin using select.poll.
+
+    Accumulates characters until newline, then returns the line.
+    """
+
+    def __init__(self):
+        self._poll = select.poll()
+        self._poll.register(sys.stdin, select.POLLIN)
+        self._buf = ""
+
+    def readline(self):
+        """Return a complete line if available, else None."""
+        while self._poll.poll(0):
+            ch = sys.stdin.read(1)
+            if ch in ("\n", "\r"):
+                line = self._buf
+                self._buf = ""
+                if line:
+                    return line
+            else:
+                self._buf += ch
+        return None
+
+
 class ButtonInput:
     """Reads GPIO pins as buttons (active low, internal pull-up)."""
 
@@ -711,10 +780,13 @@ class MuxTouchInput:
             return 100
         self._set_mux_channel(channel)
         time.sleep_us(1000)
-        if self.adc_type == "i2c":
-            raw = self.ads.read_channel(self.adc_channel)
-        else:
-            raw = self.native_adc.read_u16()
+        try:
+            if self.adc_type == "i2c":
+                raw = self.ads.read_channel(self.adc_channel)
+            else:
+                raw = self.native_adc.read_u16()
+        except OSError:
+            return 100
         velocity = int((raw / 65535.0) * 126) + 1
         return max(1, min(127, velocity))
 
@@ -839,12 +911,15 @@ class MuxScanInput:
         self._set_channel(channel)
         time.sleep_us(self.settle_us)
 
-        if self.ads:
-            ch = self.adc_a_ch if mux_id == "a" else self.adc_b_ch
-            return self.ads.read_channel(ch)
-        else:
-            adc = self.native_adc_a if mux_id == "a" else self.native_adc_b
-            return adc.read_u16() if adc else 0
+        try:
+            if self.ads:
+                ch = self.adc_a_ch if mux_id == "a" else self.adc_b_ch
+                return self.ads.read_channel(ch)
+            else:
+                adc = self.native_adc_a if mux_id == "a" else self.native_adc_b
+                return adc.read_u16() if adc else 0
+        except OSError:
+            return 0
 
     def _raw_to_velocity(self, raw):
         above = raw - self.threshold
@@ -1048,7 +1123,30 @@ def main():
     engine.start()
     print("Audio thread started on core 1")
 
-    # If no input pins/pads configured, run demos
+    # Build note lookup for stdin input
+    by_name, by_idx, by_midi = build_note_lookup(notes)
+    stdin_reader = StdinReader()
+
+    def handle_stdin(reader):
+        """Check stdin for note names and play them. Returns True if a note was played."""
+        line = reader.readline()
+        if line is None:
+            return False
+        parsed = parse_note_input(line)
+        if parsed:
+            name, octave = parsed
+            midi = note_to_midi(name, octave)
+            if midi is not None and str(midi) in by_midi:
+                note = by_midi[str(midi)]
+                display = "{}{}".format(note["name"], note["octave"])
+                print("  STDIN: {} (MIDI {}, {:.0f} Hz)".format(
+                    display, midi, note["freq"]))
+                engine.note_on(midi, velocity=100)
+                return True
+        print("  Unknown note: '{}' (try C4, c#4, Eb5, fs5, etc.)".format(line))
+        return False
+
+    # If no input pins/pads configured, run demos then accept stdin
     pads_list = hw_config.get("pads", [])
     if not pin_map and not pads_list:
         print("\nNo input pins in pan_layout.json 'hardware.pins'")
@@ -1067,15 +1165,16 @@ def main():
         if led:
             led.value(0)
 
-        print("Demo finished. Add 'hardware' config to pan_layout.json.")
-        print("For full 29-pad tenor pan, use mux_scan mode:")
-        print('  "input_mode": "mux_scan"')
+        print("\nDemo finished.")
+        print("Type a note name to play (e.g. C4, c#4, Eb5, fs5)")
+        print("Or add 'hardware' config to pan_layout.json for pad input.")
 
-        # Idle blink
+        # Accept stdin note input
         while True:
+            handle_stdin(stdin_reader)
             if led:
                 led.toggle()
-            time.sleep(1)
+            time.sleep(0.1)
 
     # Set up inputs
     if input_mode == "mux_scan":
@@ -1093,12 +1192,12 @@ def main():
         inputs = ButtonInput(pin_map, notes)
 
     print("Configured {} input pins".format(inputs.count))
-    print("\nReady - play!")
+    print("\nReady - play! (also accepts note names via serial)")
 
     if led:
         led.value(1)
 
-    # Main loop - scan inputs, play/stop notes
+    # Main loop - scan inputs + stdin, play/stop notes
     while True:
         pressed, released = inputs.scan()
 
@@ -1112,6 +1211,7 @@ def main():
             name = "{}{}".format(note["name"], note["octave"])
             print("  OFF: {}".format(name))
 
+        handle_stdin(stdin_reader)
         time.sleep(0.02)  # 50 Hz scan rate
 
 

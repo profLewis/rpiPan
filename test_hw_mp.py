@@ -266,7 +266,7 @@ def test_ads1115():
         passed("I2C bus initialized (SDA=GP4, SCL=GP5)")
     except Exception as e:
         failed("I2C init: {}".format(e))
-        return False
+        return True  # report but continue to next test
 
     # Scan I2C bus
     devices = i2c.scan()
@@ -279,7 +279,7 @@ def test_ads1115():
             info("ADS1115 not at default address 0x48")
     else:
         failed("No I2C devices found. Check wiring: SDA=GP4, SCL=GP5, VCC=3.3V")
-        return False
+        return True  # report but continue to next test
 
     # Read channels
     try:
@@ -287,7 +287,7 @@ def test_ads1115():
         passed("ADS1115 driver initialized")
     except Exception as e:
         failed("ADS1115 driver: {}".format(e))
-        return False
+        return True  # report but continue to next test
 
     channel_names = ["A0 (Mux A SIG)", "A1 (Mux B SIG)", "A2 (free)", "A3 (free)"]
 
@@ -341,7 +341,8 @@ def test_mux_scan():
         ads = ADS1115(i2c)
     except Exception as e:
         failed("ADS1115 init for mux scan: {}".format(e))
-        return False
+        info("Skipping mux scan (ADS1115 not available)")
+        return True
 
     def set_channel(channel):
         for i in range(4):
@@ -356,9 +357,12 @@ def test_mux_scan():
         set_channel(channel)
         time.sleep_ms(1)
         ch = 0 if mux_id == "a" else 1
-        raw = ads.read_channel(ch)
-        voltage = ads.read_voltage(ch)
-        return raw, voltage
+        try:
+            raw = ads.read_channel(ch)
+            voltage = ads.read_voltage(ch)
+            return raw, voltage
+        except OSError as e:
+            return None, e
 
     pads = [
         ("C4",  "a", 0),  ("C#4", "a", 1),  ("D4",  "a", 2),  ("Eb4", "a", 3),
@@ -377,18 +381,29 @@ def test_mux_scan():
 
     threshold = 3000
     active_count = 0
+    error_count = 0
 
     for i, (note, mux_id, channel) in enumerate(pads):
         raw, voltage = read_mux(mux_id, channel)
-        status = "ACTIVE" if raw > threshold else "idle"
-        if raw > threshold:
-            active_count += 1
-        print("  {:>3d}  {:>4s}  {:>3s}  {:>3d}  {:>8d}  {:>6.3f} V  {:>8s}".format(
-            i, note, mux_id.upper(), channel, raw, voltage, status))
+        if raw is None:
+            print("  {:>3d}  {:>4s}  {:>3s}  {:>3d}  {:>8s}  {:>8s}  I2C ERROR: {}".format(
+                i, note, mux_id.upper(), channel, "-", "-", voltage))
+            error_count += 1
+        else:
+            status = "ACTIVE" if raw > threshold else "idle"
+            if raw > threshold:
+                active_count += 1
+            print("  {:>3d}  {:>4s}  {:>3s}  {:>3d}  {:>8d}  {:>6.3f} V  {:>8s}".format(
+                i, note, mux_id.upper(), channel, raw, voltage, status))
 
     # Disable muxes
     en_a.value(1)
     en_b.value(1)
+
+    if error_count > 0:
+        failed("{}/{} pads got I2C errors (ADS1115 not responding)".format(
+            error_count, len(pads)))
+        info("Check: ADS1115 wired to SDA=GP4, SCL=GP5, VCC=3.3V, ADDR=GND (0x48)")
 
     print("\n  Active pads (above threshold {}): {}".format(threshold, active_count))
     if active_count == 0:
@@ -400,7 +415,10 @@ def test_mux_scan():
     print("\n  Unused mux B channels:")
     for ch in [13, 14, 15]:
         raw, voltage = read_mux("b", ch)
-        print("    B/C{}: raw={}, voltage={:.3f}V".format(ch, raw, voltage))
+        if raw is None:
+            print("    B/C{}: I2C ERROR: {}".format(ch, voltage))
+        else:
+            print("    B/C{}: raw={}, voltage={:.3f}V".format(ch, raw, voltage))
 
     en_a.value(1)
     en_b.value(1)
@@ -471,8 +489,118 @@ def test_gpio_survey():
 # 6. WAV file test
 # ---------------------------------------------------------------------------
 
+def _read_wav_header(path):
+    """Read WAV header, return (channels, sample_rate, bits, data_offset, data_len) or None."""
+    f = open(path, "rb")
+    header = f.read(44)
+    f.close()
+    if len(header) < 44 or header[:4] != b"RIFF" or header[8:12] != b"WAVE":
+        return None
+    channels = header[22] | (header[23] << 8)
+    sample_rate = (header[24] | (header[25] << 8) |
+                   (header[26] << 16) | (header[27] << 24))
+    bits = header[34] | (header[35] << 8)
+    data_len = (header[40] | (header[41] << 8) |
+                (header[42] << 16) | (header[43] << 24))
+    return channels, sample_rate, bits, 44, data_len
+
+
+def _play_wav_stream(i2s, path, max_seconds=0):
+    """Stream a WAV file to I2S. max_seconds=0 means play entire file."""
+    info = _read_wav_header(path)
+    if info is None:
+        return False
+    channels, sample_rate, bits, data_offset, data_len = info
+
+    f = open(path, "rb")
+    f.read(data_offset)  # skip header
+
+    chunk_size = 4096
+    buf = bytearray(chunk_size)
+    total_read = 0
+    if max_seconds > 0:
+        max_bytes = int(max_seconds * sample_rate * (bits // 8) * channels)
+        data_len = min(data_len, max_bytes)
+
+    while total_read < data_len:
+        n = f.readinto(buf)
+        if n is None or n == 0:
+            break
+        i2s.write(buf[:n])
+        total_read += n
+
+    f.close()
+    return True
+
+
+def _mix_wav_files(i2s, paths, max_seconds=2):
+    """Mix multiple WAV files and stream to I2S (software polyphony)."""
+    # Open all files, skip headers
+    voices = []
+    for path in paths:
+        hdr = _read_wav_header(path)
+        if hdr is None:
+            continue
+        channels, sample_rate, bits, data_offset, data_len = hdr
+        f = open(path, "rb")
+        f.read(data_offset)
+        if max_seconds > 0:
+            data_len = min(data_len, int(max_seconds * sample_rate * 2))
+        voices.append({"file": f, "remaining": data_len})
+
+    if not voices:
+        return False
+
+    chunk_samples = 512
+    chunk_bytes = chunk_samples * 2
+    n_voices = len(voices)
+    mix_buf = array.array("h", [0] * chunk_samples)
+    read_buf = bytearray(chunk_bytes)
+    out_buf = bytearray(chunk_bytes)
+
+    while True:
+        # Clear mix buffer
+        for i in range(chunk_samples):
+            mix_buf[i] = 0
+
+        active = 0
+        for v in voices:
+            if v["remaining"] <= 0:
+                continue
+            to_read = min(chunk_bytes, v["remaining"])
+            n = v["file"].readinto(read_buf, to_read)
+            if n is None or n == 0:
+                v["remaining"] = 0
+                continue
+            v["remaining"] -= n
+            active += 1
+            # Mix: decode 16-bit samples, add to mix buffer scaled by 1/n_voices
+            n_samp = n // 2
+            for i in range(n_samp):
+                s = read_buf[i * 2] | (read_buf[i * 2 + 1] << 8)
+                if s >= 0x8000:
+                    s -= 0x10000
+                val = mix_buf[i] + s // n_voices
+                if val > 32767:
+                    val = 32767
+                elif val < -32768:
+                    val = -32768
+                mix_buf[i] = val
+
+        if active == 0:
+            break
+
+        struct.pack_into("<{}h".format(chunk_samples), out_buf, 0, *mix_buf)
+        i2s.write(out_buf)
+
+    for v in voices:
+        v["file"].close()
+
+    return True
+
+
 def test_wav_files():
-    divider("WAV File Check")
+    divider("WAV File Check and Playback")
 
     sounds_dir = "sounds"
     try:
@@ -489,32 +617,32 @@ def test_wav_files():
         info("No WAV files in sounds/")
         return False
 
-    # Check a few files
-    for fname in wav_files[:5]:
+    # Check headers of all files
+    valid_files = []
+    for fname in wav_files:
         path = "{}/{}".format(sounds_dir, fname)
         try:
-            f = open(path, "rb")
-            header = f.read(44)
-            f.close()
-            if header[:4] == b"RIFF" and header[8:12] == b"WAVE":
-                channels = header[22] | (header[23] << 8)
-                sample_rate = (header[24] | (header[25] << 8) |
-                               (header[26] << 16) | (header[27] << 24))
-                bits = header[34] | (header[35] << 8)
+            hdr = _read_wav_header(path)
+            if hdr:
+                channels, sample_rate, bits, _, data_len = hdr
                 stat = os.stat(path)
                 size = stat[6]
-                print("  {}: {}ch, {}Hz, {}bit, {:.1f}KB".format(
-                    fname, channels, sample_rate, bits, size / 1024))
+                duration = data_len / (sample_rate * (bits // 8) * channels)
+                print("  {}: {}ch, {}Hz, {}bit, {:.1f}KB, {:.1f}s".format(
+                    fname, channels, sample_rate, bits, size / 1024, duration))
+                valid_files.append(fname)
             else:
                 print("  {}: not a valid WAV file".format(fname))
         except Exception as e:
             print("  {}: read error: {}".format(fname, e))
 
-    if len(wav_files) > 5:
-        print("  ... and {} more".format(len(wav_files) - 5))
+    if not valid_files:
+        failed("No valid WAV files found")
+        return False
 
-    # Try to play the first WAV file through I2S
-    info("Playing first WAV file through I2S...")
+    passed("{} valid WAV files".format(len(valid_files)))
+
+    # Init I2S
     try:
         i2s = machine.I2S(
             0,
@@ -527,32 +655,67 @@ def test_wav_files():
             rate=22050,
             ibuf=8192,
         )
-
-        path = "{}/{}".format(sounds_dir, wav_files[0])
-        f = open(path, "rb")
-        header = f.read(44)  # skip WAV header
-        data_len = (header[40] | (header[41] << 8) |
-                    (header[42] << 16) | (header[43] << 24))
-
-        chunk_size = 4096
-        buf = bytearray(chunk_size)
-        total_read = 0
-        max_read = min(data_len, 22050 * 2 * 2)  # max 2 seconds
-
-        passed("Playing: {}".format(wav_files[0]))
-        while total_read < max_read:
-            n = f.readinto(buf)
-            if n is None or n == 0:
-                break
-            i2s.write(buf[:n])
-            total_read += n
-
-        f.close()
-        time.sleep(0.2)
-        i2s.deinit()
     except Exception as e:
-        failed("WAV playback: {}".format(e))
+        failed("I2S init for WAV playback: {}".format(e))
         return False
+
+    # --- Sequential playback: play all WAV files one after another ---
+    info("Sequential playback: all {} notes...".format(len(valid_files)))
+    for fname in valid_files:
+        path = "{}/{}".format(sounds_dir, fname)
+        name = fname.replace(".wav", "")
+        print("    {}".format(name), end="")
+        try:
+            ok = _play_wav_stream(i2s, path)
+            if ok:
+                print(" OK")
+            else:
+                print(" FAIL")
+        except Exception as e:
+            print(" ERROR: {}".format(e))
+    passed("Sequential playback complete")
+
+    # --- Polyphonic playback: play chords using actual WAV samples ---
+    info("Polyphonic playback: chords from WAV samples...")
+
+    # Build lookup of available files
+    available = {}
+    for fname in valid_files:
+        name = fname.replace(".wav", "")
+        available[name] = "{}/{}".format(sounds_dir, fname)
+
+    chords = [
+        ("C major",  ["C4", "E4", "G4"]),
+        ("F major",  ["F4", "A4", "C5"]),
+        ("G major",  ["G4", "B4", "D5"]),
+        ("C major7", ["C4", "E4", "G4", "B4"]),
+        ("Full C",   ["C4", "E4", "G4", "C5", "E5", "G5"]),
+    ]
+
+    for chord_name, notes in chords:
+        paths = [available[n] for n in notes if n in available]
+        if not paths:
+            print("    {}: skipped (notes not available)".format(chord_name))
+            continue
+        note_names = [n for n in notes if n in available]
+        print("    {} ({})...".format(chord_name, " + ".join(note_names)), end="")
+        try:
+            ok = _mix_wav_files(i2s, paths, max_seconds=2)
+            if ok:
+                print(" OK")
+            else:
+                print(" FAIL")
+        except Exception as e:
+            print(" ERROR: {}".format(e))
+        time.sleep(0.3)
+
+    passed("Polyphonic playback complete")
+
+    # Silence + cleanup
+    silence = bytearray(4096)
+    i2s.write(silence)
+    time.sleep(0.1)
+    i2s.deinit()
 
     passed("WAV file test complete")
     return True
@@ -620,9 +783,7 @@ def main():
     except Exception:
         pass
 
-    print("\nDiagnostic complete. Press Ctrl+C or reset to exit.")
-    while True:
-        time.sleep(1)
+    print("\nDiagnostic complete.")
 
 
 main()
