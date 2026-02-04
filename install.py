@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
 """
-install.py - Convert WAV samples and install rpiPan to a Pico CIRCUITPY drive.
+install.py - Convert WAV samples and install rpiPan to a Pico.
 
-Converts panipuri's 44100 Hz stereo WAV files to 16-bit mono 22050 Hz
-(suitable for CircuitPython audiomixer), then copies code.py, pan_layout.json,
-and the converted sounds/ to the target drive. Can also install required
-CircuitPython libraries (adafruit_ads1x15, adafruit_bus_device) from the
-Adafruit Bundle.
+Converts panipuri's 44100 Hz stereo WAV files to 16-bit mono 22050 Hz,
+then deploys to the Pico. Supports both MicroPython (default) and
+CircuitPython platforms.
 
 Usage:
-    python install.py                          # Uses /Volumes/CIRCUITPY
-    python install.py /Volumes/CIRCUITPY       # Explicit drive path
-    python install.py /Volumes/CIRCUITPY --source ../panipuri/sounds
+    python install.py                          # MicroPython (default), stages files
+    python install.py --platform circuitpython /Volumes/CIRCUITPY  # CircuitPython
+    python install.py --source ../panipuri/sounds  # Custom source directory
     python install.py --dry-run                # Show what would be done
-    python install.py --convert-only           # Just convert, don't copy to drive
-    python install.py --libs                   # Also install CP libraries
-    python install.py --libs-only              # Only install CP libraries
+    python install.py --convert-only           # Just convert, don't copy
+    python install.py --platform circuitpython --libs  # Also install CP libraries
+    python install.py --platform circuitpython --libs-only /Volumes/CIRCUITPY
 """
 
 import os
@@ -202,44 +200,30 @@ def get_needed_files(layout_path):
 # Install
 # ---------------------------------------------------------------------------
 
-def install(drive_path, source_dir, dry_run=False, convert_only=False,
-            target_rate=TARGET_RATE, force=False):
-    """Convert samples and install to CIRCUITPY drive."""
+def convert_samples(source_dir, converted_dir, layout_path, target_rate,
+                    dry_run=False, force=False):
+    """Convert WAV samples from source to converted directory.
 
-    layout_path = os.path.join(SCRIPT_DIR, "pan_layout.json")
-    code_path = os.path.join(SCRIPT_DIR, "code.py")
-    converted_dir = os.path.join(SCRIPT_DIR, "sounds_converted")
-
-    # Resolve source directory
+    Returns (available_files, success) where available_files is a list
+    of filenames that were converted (or already up to date).
+    """
     source_dir = os.path.abspath(source_dir)
-
-    print("rpiPan Installer")
-    print("=" * 50)
-    print("  Source sounds:  {}".format(source_dir))
-    print("  Convert to:     {} Hz, {}-bit, mono".format(
-        target_rate, TARGET_SAMPWIDTH * 8))
-    print("  Staging dir:    {}".format(converted_dir))
-    if not convert_only:
-        print("  Target drive:   {}".format(drive_path))
-    print()
 
     # Validate source
     if not os.path.isdir(source_dir):
         print("ERROR: Source sounds directory not found: {}".format(source_dir))
         print("  Specify with --source, e.g.:")
         print("    python install.py --source /path/to/panipuri/sounds")
-        return False
+        return [], False
 
-    # Validate layout
     if not os.path.isfile(layout_path):
-        print("ERROR: pan_layout.json not found in {}".format(SCRIPT_DIR))
-        return False
+        print("ERROR: pan_layout.json not found in {}".format(
+            os.path.dirname(layout_path)))
+        return [], False
 
-    # Get list of needed WAV files from layout
     needed = get_needed_files(layout_path)
     print("Notes in layout: {} WAV files needed".format(len(needed)))
 
-    # Check which source files exist
     available = []
     missing = []
     for fname in needed:
@@ -257,9 +241,8 @@ def install(drive_path, source_dir, dry_run=False, convert_only=False,
 
     if not available:
         print("ERROR: No source WAV files found in {}".format(source_dir))
-        return False
+        return [], False
 
-    # Convert WAV files
     print("--- Converting samples ---")
     if not dry_run:
         os.makedirs(converted_dir, exist_ok=True)
@@ -272,7 +255,6 @@ def install(drive_path, source_dir, dry_run=False, convert_only=False,
         src = os.path.join(source_dir, fname)
         dst = os.path.join(converted_dir, fname)
 
-        # Skip if already converted and not forcing
         if os.path.isfile(dst) and not force:
             src_mtime = os.path.getmtime(src)
             dst_mtime = os.path.getmtime(dst)
@@ -299,19 +281,122 @@ def install(drive_path, source_dir, dry_run=False, convert_only=False,
     print("\nConverted: {}, Skipped (up to date): {}, Errors: {}".format(
         converted, skipped, errors))
 
-    if convert_only:
-        print("\nConverted files in: {}".format(converted_dir))
-        print("Done (--convert-only mode).")
-        return True
+    return available, True
 
-    # Validate target drive
+
+def stage_micropython(converted_dir, available, layout_path, dry_run=False):
+    """Stage MicroPython files for upload via Thonny or mpremote.
+
+    Creates micropython_staging/ with main.py, test_hw.py,
+    pan_layout.json, and sounds/.
+    """
+    staging = os.path.join(SCRIPT_DIR, "micropython_staging")
+    main_src = os.path.join(SCRIPT_DIR, "main_mp.py")
+    test_src = os.path.join(SCRIPT_DIR, "test_hw_mp.py")
+
+    print("\n--- Staging MicroPython files ---")
+
+    if not dry_run:
+        os.makedirs(staging, exist_ok=True)
+
+    # 1. Copy main_mp.py -> main.py
+    dst = os.path.join(staging, "main.py")
+    if dry_run:
+        print("  Would copy: main_mp.py -> main.py")
+    else:
+        shutil.copy(main_src, dst)
+        print("  main.py ({:.0f} KB)".format(os.path.getsize(dst) / 1024))
+
+    # 2. Copy test_hw_mp.py -> test_hw.py
+    dst = os.path.join(staging, "test_hw.py")
+    if os.path.isfile(test_src):
+        if dry_run:
+            print("  Would copy: test_hw_mp.py -> test_hw.py")
+        else:
+            shutil.copy(test_src, dst)
+            print("  test_hw.py ({:.0f} KB)".format(os.path.getsize(dst) / 1024))
+
+    # 3. Copy pan_layout.json
+    dst = os.path.join(staging, "pan_layout.json")
+    if dry_run:
+        print("  Would copy: pan_layout.json")
+    else:
+        shutil.copy(layout_path, dst)
+        print("  pan_layout.json ({:.0f} KB)".format(os.path.getsize(dst) / 1024))
+
+    # 4. Copy converted sounds
+    sounds_dst = os.path.join(staging, "sounds")
+    if not dry_run:
+        os.makedirs(sounds_dst, exist_ok=True)
+
+    copied = 0
+    total_size = 0
+    for fname in available:
+        src = os.path.join(converted_dir, fname)
+        dst_file = os.path.join(sounds_dst, fname)
+        if not os.path.isfile(src):
+            continue
+        if dry_run:
+            print("  Would copy: sounds/{}".format(fname))
+        else:
+            shutil.copy(src, dst_file)
+            sz = os.path.getsize(dst_file)
+            total_size += sz
+        copied += 1
+
+    print("  sounds/ ({} files, {:.0f} KB total)".format(
+        copied, total_size / 1024))
+
+    # Check max_voices
+    try:
+        with open(layout_path, "r") as f:
+            data = json.load(f)
+        max_v = data.get("hardware", {}).get("max_voices", 6)
+        if max_v > 6:
+            print("\nNOTE: pan_layout.json has \"max_voices\": {}. MicroPython".format(
+                max_v))
+            print("  software mixing works best with 6 or fewer voices on RP2040.")
+    except Exception:
+        pass
+
+    # Print upload instructions
+    print("\n" + "=" * 50)
+    if dry_run:
+        print("DRY RUN complete. No files were modified.")
+    else:
+        print("MicroPython files staged in: {}".format(staging))
+    print("\nTo upload to your Pico:")
+    print()
+    print("  Option 1 — Thonny IDE (recommended):")
+    print("    1. Open Thonny, connect to Pico")
+    print("    2. View > Files to open the file browser")
+    print("    3. Navigate to {}".format(staging))
+    print("    4. Right-click each file/folder and 'Upload to /'")
+    print()
+    print("  Option 2 — mpremote (command line):")
+    print("    pip install mpremote")
+    print("    cd {}".format(staging))
+    print("    mpremote fs cp main.py :main.py")
+    print("    mpremote fs cp pan_layout.json :pan_layout.json")
+    print("    mpremote fs cp test_hw.py :test_hw.py")
+    print("    mpremote fs cp -r sounds/ :")
+    print()
+    print("Then reset the Pico to run.")
+
+    return True
+
+
+def install_circuitpython(drive_path, converted_dir, available, layout_path,
+                          dry_run=False):
+    """Copy CircuitPython files to CIRCUITPY drive."""
+    code_path = os.path.join(SCRIPT_DIR, "code.py")
+
     if not os.path.isdir(drive_path):
         print("\nERROR: Drive not found: {}".format(drive_path))
         print("  Is the Pico connected and mounted?")
-        print("  Specify drive path: python install.py /path/to/CIRCUITPY")
+        print("  Specify drive path: python install.py --platform circuitpython /path/to/CIRCUITPY")
         return False
 
-    # Copy files to drive
     print("\n--- Installing to {} ---".format(drive_path))
 
     # 1. Copy code.py
@@ -340,10 +425,8 @@ def install(drive_path, source_dir, dry_run=False, convert_only=False,
     for fname in available:
         src = os.path.join(converted_dir, fname)
         dst = os.path.join(sounds_dst, fname)
-
         if not os.path.isfile(src):
             continue
-
         if dry_run:
             print("  Would copy: sounds/{}".format(fname))
         else:
@@ -375,6 +458,47 @@ def install(drive_path, source_dir, dry_run=False, convert_only=False,
     print("\nThe Pico should restart automatically and play the demo.")
 
     return True
+
+
+def install(drive_path, source_dir, platform="micropython", dry_run=False,
+            convert_only=False, target_rate=TARGET_RATE, force=False):
+    """Convert samples and install to Pico."""
+
+    layout_path = os.path.join(SCRIPT_DIR, "pan_layout.json")
+    converted_dir = os.path.join(SCRIPT_DIR, "sounds_converted")
+    source_dir = os.path.abspath(source_dir)
+
+    print("rpiPan Installer")
+    print("=" * 50)
+    print("  Platform:       {}".format(platform))
+    print("  Source sounds:  {}".format(source_dir))
+    print("  Convert to:     {} Hz, {}-bit, mono".format(
+        target_rate, TARGET_SAMPWIDTH * 8))
+    print("  Staging dir:    {}".format(converted_dir))
+    if not convert_only and platform == "circuitpython":
+        print("  Target drive:   {}".format(drive_path))
+    print()
+
+    # Convert samples
+    available, success = convert_samples(
+        source_dir, converted_dir, layout_path, target_rate,
+        dry_run=dry_run, force=force)
+
+    if not success:
+        return False
+
+    if convert_only:
+        print("\nConverted files in: {}".format(converted_dir))
+        print("Done (--convert-only mode).")
+        return True
+
+    # Deploy based on platform
+    if platform == "micropython":
+        return stage_micropython(converted_dir, available, layout_path,
+                                 dry_run=dry_run)
+    else:
+        return install_circuitpython(drive_path, converted_dir, available,
+                                     layout_path, dry_run=dry_run)
 
 
 # ---------------------------------------------------------------------------
@@ -613,11 +737,17 @@ def install_libs(drive_path, dry_run=False):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Convert and install rpiPan to a Pico CIRCUITPY drive"
+        description="Convert and install rpiPan to a Raspberry Pi Pico"
     )
     parser.add_argument(
         "drive", nargs="?", default=DEFAULT_DRIVE,
-        help="Path to CIRCUITPY drive (default: {})".format(DEFAULT_DRIVE),
+        help="Path to CIRCUITPY drive (CircuitPython only, default: {})".format(
+            DEFAULT_DRIVE),
+    )
+    parser.add_argument(
+        "--platform", choices=["micropython", "circuitpython"],
+        default="micropython",
+        help="Target platform (default: micropython)",
     )
     parser.add_argument(
         "--source", default=DEFAULT_SOURCE,
@@ -646,12 +776,19 @@ def main():
     )
     parser.add_argument(
         "--libs-only", action="store_true",
-        help="Only install libraries, skip WAV conversion and file copy",
+        help="Only install CircuitPython libraries, skip everything else",
     )
 
     args = parser.parse_args()
 
-    # Install libraries only
+    # Handle --libs for MicroPython
+    if args.platform == "micropython" and (args.libs or args.libs_only):
+        print("MicroPython does not need external libraries.")
+        print("The ADS1115 driver is built into main_mp.py.")
+        if args.libs_only:
+            sys.exit(0)
+
+    # Install libraries only (CircuitPython)
     if args.libs_only:
         if not os.path.isdir(args.drive):
             print("ERROR: Drive not found: {}".format(args.drive))
@@ -660,18 +797,20 @@ def main():
         success = install_libs(args.drive, dry_run=args.dry_run)
         sys.exit(0 if success else 1)
 
-    # Normal install (convert + copy + optionally install libs)
+    # Normal install (convert + deploy)
     success = install(
         drive_path=args.drive,
         source_dir=args.source,
+        platform=args.platform,
         dry_run=args.dry_run,
         convert_only=args.convert_only,
         target_rate=args.rate,
         force=args.force,
     )
 
-    # Install libraries if requested or if I2S mode is configured
-    if success and args.libs and not args.convert_only:
+    # Install CircuitPython libraries if requested
+    if (success and args.libs and not args.convert_only
+            and args.platform == "circuitpython"):
         if os.path.isdir(args.drive):
             install_libs(args.drive, dry_run=args.dry_run)
 

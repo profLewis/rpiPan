@@ -1,21 +1,21 @@
 # rpiPan
 
-A steel pan instrument running CircuitPython. Designed for the Raspberry Pi Pico H but works on any CircuitPython-compatible board (Pico 2, Pico W, ESP32-S3, Arduino RP2040, etc.). Plays real WAV samples from the [panipuri](https://github.com/profLewis/paniPuri) project with polyphonic playback and velocity-sensitive touch input via analog multiplexers. All 29 notes of a tenor pan using only 9 GPIO pins.
+A steel pan instrument for the Raspberry Pi Pico. Plays real WAV samples from the [panipuri](https://github.com/profLewis/paniPuri) project with polyphonic playback and velocity-sensitive touch input via analog multiplexers. All 29 notes of a tenor pan using only 9 GPIO pins. Supports MicroPython (default) and CircuitPython.
 
 ## Features
 
 - **Real steel pan samples** — uses WAV recordings from the [urbanPan](https://github.com/urbansmash/urbanPan) Double Seconds pan
-- **Polyphonic playback** — 8 simultaneous voices via CircuitPython `audiomixer`, round-robin allocation with voice stealing
-- **Velocity-sensitive input** — analog multiplexer reads strike force (0–3.3V) and maps it to MIDI velocity 1–127
+- **Polyphonic playback** — 6 simultaneous voices with software mixing (MicroPython) or 8 voices via `audiomixer` (CircuitPython)
+- **Velocity-sensitive input** — analog multiplexer reads strike force (0-3.3V) and maps it to MIDI velocity 1-127
 - **JSON-driven configuration** — `pan_layout.json` defines note layout, pin assignments, mux wiring, and audio settings
 - **Tenor pan range** — C4 to E6, 29 notes across 3 concentric rings (outer/central/inner)
-- **Four input modes** — digital buttons, capacitive touch, mux-based touch with analog velocity, or full analog scan (29 pads, 9 pins)
-- **Board auto-detection** — detects Pico, Pico 2, Pico W, ESP32-S3, Arduino RP2040 at startup and applies sensible pin defaults; JSON config overrides as needed
-- **Automatic install** — `install.py` converts samples and deploys to the Pico
+- **Multiple input modes** — digital buttons, mux-based touch with analog velocity, or full analog scan (29 pads, 9 pins)
+- **Board auto-detection** — detects Pico, Pico 2, Pico W at startup and applies sensible pin defaults
+- **Automatic install** — `install.py` converts samples and stages files for upload
 
 ## Hardware
 
-- Raspberry Pi Pico H (or Pico 2, Pico W, any CircuitPython board)
+- Raspberry Pi Pico H (or Pico 2, Pico W)
 - Waveshare Pico-Audio HAT (I2S DAC, PCM5101A) — plugs onto Pico
 - ADS1115 I2C ADC breakout (16-bit, reads mux analog signals)
 - 2x HW-178 multiplexer modules (CD74HC4067 16-channel analog mux breakout)
@@ -23,59 +23,126 @@ A steel pan instrument running CircuitPython. Designed for the Raspberry Pi Pico
 - 4W speaker (4-8 ohm) — connects to Pico-Audio speaker header
 - See [WIRING.md](WIRING.md) for the full wiring diagram
 
-Alternative: use PWM audio (no HAT needed) with an external amplifier — see WIRING.md.
+## Quick Start (MicroPython)
 
-## Quick Start
+### 1. Install MicroPython Firmware
 
-### 1. Install CircuitPython
+Download the MicroPython UF2 firmware for your board:
 
-Download CircuitPython for the Pico from [circuitpython.org](https://circuitpython.org/board/raspberry_pi_pico/) and flash it to the board. The Pico will appear as a `CIRCUITPY` USB drive.
+- **Pico / Pico H**: [micropython.org/download/RPI_PICO/](https://micropython.org/download/RPI_PICO/)
+- **Pico 2**: [micropython.org/download/RPI_PICO2/](https://micropython.org/download/RPI_PICO2/)
+- **Pico W**: [micropython.org/download/RPI_PICO_W/](https://micropython.org/download/RPI_PICO_W/)
 
-### 2. Install rpiPan
+Flash the firmware:
+
+1. Hold the **BOOTSEL** button on the Pico and plug it into USB
+2. The Pico appears as a USB drive called `RPI-RP2`
+3. Drag the `.uf2` file onto the drive — the Pico reboots into MicroPython
+4. Do not disconnect during flashing
+
+### 2. Install Thonny IDE
+
+[Thonny](https://thonny.org) is the recommended IDE for MicroPython development.
+
+1. Download and install from [thonny.org](https://thonny.org)
+2. Open Thonny
+3. Go to **Tools > Options > Interpreter**
+4. Select **MicroPython (Raspberry Pi Pico)**
+5. Select the correct USB serial port
+6. Click OK — you should see the MicroPython REPL (`>>>`) at the bottom
+
+### 3. Convert and Stage Files
 
 ```bash
 # Clone the repo
 git clone https://github.com/profLewis/rpiPan.git
 cd rpiPan
 
-# Convert samples and copy everything to the Pico
-python install.py /Volumes/CIRCUITPY
+# Convert samples and stage for MicroPython (default)
+python install.py
+
+# Or with explicit source path
+python install.py --source ../panipuri/sounds
 ```
 
-This converts the panipuri WAV files (44100 Hz stereo) to Pico-friendly format (22050 Hz mono), then copies `code.py`, `pan_layout.json`, and `sounds/` to the drive.
+This converts the panipuri WAV files (44100 Hz stereo) to Pico-friendly format (22050 Hz mono) and stages all files in `micropython_staging/`.
 
-### 2b. Install CircuitPython Libraries (for I2S + ADS1115)
+### 4. Upload to Pico
 
-If using the default I2S audio configuration with ADS1115, install the required libraries:
+**Option A: Thonny IDE** (recommended)
+
+1. Open Thonny, connect to your Pico
+2. Go to **View > Files** to open the file browser
+3. Navigate to the `micropython_staging/` directory on your computer
+4. Right-click each file/folder and select **Upload to /**
+5. Upload: `main.py`, `pan_layout.json`, and the `sounds/` folder
+
+**Option B: mpremote** (command line)
 
 ```bash
-# Automatic — downloads from the Adafruit Bundle, detects CP version
-python install.py --libs-only /Volumes/CIRCUITPY
+pip install mpremote
+cd micropython_staging
+mpremote fs cp main.py :main.py
+mpremote fs cp pan_layout.json :pan_layout.json
+mpremote fs cp -r sounds/ :
+```
 
-# Or combine with sample install
-python install.py --libs /Volumes/CIRCUITPY
+### 5. Run
 
-# Or manually using circup
-pip install circup
-circup install adafruit_ads1x15 adafruit_bus_device
+Reset the Pico (unplug/replug or press the reset button). MicroPython runs `main.py` automatically. Monitor output via Thonny's Shell or `mpremote`.
+
+To run the hardware diagnostic:
+
+1. Upload `test_hw.py` to the Pico
+2. In Thonny, open `test_hw.py` on the Pico and click Run (F5)
+
+### 6. Wire up pads
+
+Connect touch pads and the multiplexer as described in [WIRING.md](WIRING.md), then edit `pan_layout.json` to map GPIO pins to notes.
+
+## CircuitPython Alternative
+
+rpiPan also supports CircuitPython. The CircuitPython version uses hardware audio mixing (`audiomixer`) for 8-voice polyphony and supports capacitive touch input.
+
+### CircuitPython Quick Start
+
+1. Download CircuitPython for your board from [circuitpython.org](https://circuitpython.org/board/raspberry_pi_pico/) and flash it. The Pico appears as a `CIRCUITPY` USB drive.
+
+2. Install rpiPan:
+
+```bash
+python install.py --platform circuitpython /Volumes/CIRCUITPY
+```
+
+3. Install required libraries (for I2S + ADS1115):
+
+```bash
+python install.py --platform circuitpython --libs-only /Volumes/CIRCUITPY
 ```
 
 The Pico restarts automatically and runs the demo.
 
-### 3. Wire up pads
+### MicroPython vs CircuitPython
 
-Connect touch pads and the multiplexer as described in [WIRING.md](WIRING.md), then edit `pan_layout.json` to map GPIO pins to notes.
+| Feature | MicroPython (default) | CircuitPython |
+|---------|----------------------|---------------|
+| Main file | `main.py` | `code.py` |
+| Audio mixing | Software (6 voices) | `audiomixer` hardware (8 voices) |
+| I2S output | `machine.I2S` | `audiobusio.I2SOut` |
+| ADS1115 driver | Built-in (no libraries needed) | External `adafruit_ads1x15` library |
+| File transfer | Thonny IDE or mpremote | USB drive (drag-and-drop) |
+| Capacitive touch | Not available | `touchio` supported |
+| Auto-reload | No (manual reset) | Yes (on file save) |
+| IDE | Thonny recommended | Any text editor |
 
 ## Board Auto-Detection
 
-On startup, `code.py` detects the board type and applies sensible default pin assignments. Any settings in `pan_layout.json` override the defaults, so you only need to configure what differs from the standard setup.
+On startup, the main program detects the board type and applies sensible default pin assignments. Any settings in `pan_layout.json` override the defaults.
 
-| Board | Detected as | I2S Pins | I2C Pins | Mux Select |
-|-------|-------------|----------|----------|------------|
-| Pico / Pico 2 | `raspberry_pi_pico` | GP26/27/28 | GP4/GP5 | GP10-13 |
-| Pico W | `raspberry_pi_pico_w` | GP26/27/28 | GP4/GP5 | GP10-13 |
-| ESP32-S3 | `esp32s3` | IO4/5/6 | native ADC | IO10-13 |
-| Arduino Nano RP2040 | `arduino_nano_rp2040_connect` | D2/3/4 | A4/A5 | D5-8 |
+| Board | I2S Pins | I2C Pins | Mux Select |
+|-------|----------|----------|------------|
+| Pico / Pico H / Pico 2 | GP26/27/28 | GP4/GP5 | GP10-13 |
+| Pico W | GP26/27/28 | GP4/GP5 | GP10-13 |
 
 For most Pico setups, the JSON `"hardware"` section only needs `input_mode` and `pads` — pin assignments are automatic.
 
@@ -97,7 +164,7 @@ All configuration lives in `pan_layout.json`. The `"notes"` section defines the 
       "data": "GP26"
     },
     "input_mode": "mux_scan",
-    "max_voices": 8,
+    "max_voices": 6,
     "sample_rate": 22050,
     "adc": {"type": "i2c", "sda": "GP4", "scl": "GP5"},
     "mux": {
@@ -121,7 +188,7 @@ All configuration lives in `pan_layout.json`. The `"notes"` section defines the 
 | Mux Scan | `"mux_scan"` | Full 29-pad scan via 2 muxes. Analog threshold triggers, magnitude = velocity. 9 pins. |
 | Mux Touch | `"mux_touch"` | Digital trigger + analog velocity via single mux. Up to ~20 pads. |
 | Button | `"button"` | Digital GPIO pins with internal pull-up, active low. Fixed velocity. |
-| Touch | `"touch"` | Capacitive touch via `touchio`. Fixed velocity. |
+| Touch | `"touch"` | Capacitive touch via `touchio`. Fixed velocity. CircuitPython only. |
 
 **Mux scan mode** — full 29-pad tenor pan, velocity-sensitive, I2S audio via Pico-Audio HAT:
 
@@ -172,11 +239,11 @@ All configuration lives in `pan_layout.json`. The `"notes"` section defines the 
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `audio_out` | `"i2s"` | Audio backend: `"i2s"` or `"pwm"` |
-| `i2s` | see below | I2S pin config (when `audio_out` is `"i2s"`) |
-| `audio_pin` | `"GP18"` | PWM audio output pin (when `audio_out` is `"pwm"`) |
+| `audio_out` | `"i2s"` | Audio backend: `"i2s"` or `"pwm"` (CircuitPython only) |
+| `i2s` | see below | I2S pin config |
+| `audio_pin` | `"GP18"` | PWM audio output pin (CircuitPython `"pwm"` mode) |
 | `adc` | `null` | ADC config: `{"type": "i2c", "sda": "GP4", "scl": "GP5"}` for ADS1115 |
-| `max_voices` | `8` | Simultaneous polyphony voices |
+| `max_voices` | `6` | Simultaneous polyphony voices (6 recommended for MicroPython, up to 8 for CircuitPython) |
 | `sample_rate` | `22050` | Audio sample rate in Hz |
 | `sounds_dir` | `"sounds"` | Directory containing WAV files |
 | `led_pin` | `"LED"` | Activity indicator LED |
@@ -196,15 +263,14 @@ Pin mappings accept notes in several formats:
 Converts panipuri's WAV samples and deploys to the Pico.
 
 ```bash
-python install.py                              # Default: /Volumes/CIRCUITPY
-python install.py /Volumes/CIRCUITPY           # Explicit drive path
+python install.py                              # MicroPython (default), stages files
+python install.py --platform circuitpython /Volumes/CIRCUITPY  # CircuitPython
 python install.py --source ../panipuri/sounds  # Custom source directory
-python install.py --convert-only               # Convert without copying to drive
+python install.py --convert-only               # Convert without deploying
 python install.py --dry-run                    # Preview without changes
 python install.py --force                      # Re-convert even if up to date
 python install.py --rate 44100                 # Keep original sample rate
-python install.py --libs                       # Also install CircuitPython libraries
-python install.py --libs-only                  # Only install libraries
+python install.py --platform circuitpython --libs /Volumes/CIRCUITPY  # CP + libraries
 ```
 
 The converter uses only the Python standard library — no numpy or scipy required. Converted files are cached in `sounds_converted/` so subsequent runs are fast.
@@ -221,23 +287,32 @@ The 29 tenor pan notes are arranged across 3 concentric rings:
 
 ## How It Works
 
-1. On boot, `code.py` reads `pan_layout.json` to load the note layout and hardware config
-2. WAV files from `sounds/` are loaded via `audiocore.WaveFile` (streamed from flash)
-3. An `audiomixer.Mixer` runs continuously on `audiobusio.I2SOut` (or `audiopwmio.PWMAudioOut` for PWM mode)
-4. The main loop scans input pins at 50 Hz
-5. On touch: the mux reads the analog voltage, maps it to velocity, and triggers `note_on`
-6. `note_on` allocates a mixer voice (round-robin), sets volume from velocity (`(vel/127)^0.7`), and plays the WAV
+### MicroPython
+
+1. On boot, `main.py` reads `pan_layout.json` to load the note layout and hardware config
+2. A software audio mixer (`MixEngine`) runs on core 1 via `_thread`
+3. WAV files from `sounds/` are streamed in 512-sample chunks through `machine.I2S`
+4. The main loop scans input pins at 50 Hz on core 0
+5. On touch: the mux reads the analog voltage, maps it to velocity, and queues a `note_on`
+6. The mixer reads PCM data from active voices, mixes with fixed-point volume, and writes to I2S
 7. Notes decay naturally — no explicit `note_off` needed (like a real steel pan)
 
-If WAV files or `audiomixer` are unavailable, the code falls back to simple PWM tone generation.
+### CircuitPython
+
+1. On boot, `code.py` reads `pan_layout.json` and sets up `audiomixer.Mixer` on `audiobusio.I2SOut`
+2. WAV files are loaded via `audiocore.WaveFile` and played through mixer voices
+3. The main loop scans input pins at 50 Hz
+4. Falls back to PWM tone generation if WAV files or `audiomixer` are unavailable
 
 ## Files
 
 | File | Description |
 |------|-------------|
-| `code.py` | Main CircuitPython program (copy to Pico as `code.py`) |
-| `test_hw.py` | Hardware diagnostic (copy to Pico as `code.py` to run) |
-| `pan_layout.json` | Note layout + hardware configuration |
+| `main_mp.py` | MicroPython main program (deployed as `main.py`) |
+| `test_hw_mp.py` | MicroPython hardware diagnostic (deployed as `test_hw.py`) |
+| `code.py` | CircuitPython main program |
+| `test_hw.py` | CircuitPython hardware diagnostic |
+| `pan_layout.json` | Note layout + hardware configuration (shared) |
 | `install.py` | Sample converter and Pico installer |
 | `WIRING.md` | Wiring diagram (I2S + ADS1115 + dual mux) |
 | `sounds/` | WAV samples (generated by `install.py`) |

@@ -1,3 +1,4 @@
 sounds_converted/
+micropython_staging/
 __pycache__/
 *.pyc
