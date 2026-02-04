@@ -176,14 +176,18 @@
     }
   ],
   "hardware": {
-      "audio_pin": "GP18",
-      "input_mode": "button",
-      "max_voices": 8,
-      "sample_rate": 22050,
-      "pins": {
-        "GP0": "C4",
-        "GP1": "D4",
-        "GP2": "E4"
-      }
+    "audio_pin": "GP18",
+    "input_mode": "mux_touch",
+    "max_voices": 8,
+    "sample_rate": 22050,
+    "mux": {
+      "analog_pin": "GP26",
+      "select_pins": ["GP10", "GP11", "GP12", "GP13"]
+    },
+    "pins": {
+      "GP0": {"note": "C4", "mux_channel": 0},
+      "GP1": {"note": "D4", "mux_channel": 1},
+      "GP2": {"note": "E4", "mux_channel": 2}
     }
+  }
 }

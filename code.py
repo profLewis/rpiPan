@@ -1,21 +1,28 @@
 """
-rpiPan - Polyphonic Steel Pan instrument for Raspberry Pi Pico (CircuitPython)
+rpiPan - Steel Pan instrument for Raspberry Pi Pico (CircuitPython)
 
 Reads pan_layout.json to configure note layout, plays WAV samples with
-polyphonic mixing via audiomixer, responds to capacitive touch or button inputs.
+polyphonic mixing via audiomixer, responds to touch or button inputs.
+Supports velocity-sensitive playback via analog multiplexer readings.
 
 Hardware:
     - Raspberry Pi Pico (RP2040)
-    - Audio output on GP18 + GP19 (stereo PWM, configurable)
-    - Speaker/amplifier connected to audio pin(s)
+    - Audio output on GP18 (configurable PWM audio)
+    - Speaker/amplifier connected to audio pin
     - Touch pads or buttons on configurable GPIO pins
+    - Optional: analog multiplexer (e.g. CD74HC4067) for velocity sensing
+
+Input modes:
+    - "button"    : digital GPIO pins, fixed velocity
+    - "touch"     : capacitive touch (touchio), fixed velocity
+    - "mux_touch" : digital trigger + analog velocity via multiplexer
 
 Setup:
     1. Install CircuitPython on the Pico
     2. Copy this file as code.py to CIRCUITPY drive
     3. Copy pan_layout.json to CIRCUITPY drive
     4. Copy sounds/ directory with WAV files to CIRCUITPY drive
-       (WAV files: 16-bit signed, mono or stereo, 22050 or 44100 Hz)
+       (WAV files: 16-bit signed, mono, 22050 Hz — use install.py to convert)
 
 The sounds/ directory should contain files named like the panipuri project:
     C4.wav, Cs4.wav, D4.wav, Ds4.wav, E4.wav, F4.wav, Fs4.wav, ...
@@ -317,7 +324,7 @@ class TonePlayer:
         self.note_off(0)
 
     def load_all(self, notes):
-        print("Tone mode (no WAV files) - monophonic only")
+        print("Tone mode (no WAV files)")
         return 0
 
     def deinit(self):
@@ -447,6 +454,139 @@ class TouchInput:
         return len(self.pads)
 
 
+class MuxTouchInput:
+    """Digital touch trigger + analog velocity via multiplexer.
+
+    Each pad has a digital GPIO pin for touch detection and a channel
+    on an analog multiplexer (e.g. CD74HC4067) for reading strike
+    intensity. The mux select pins choose which channel to read;
+    the analog pin returns a 0-3.3V signal proportional to force.
+
+    Config in pan_layout.json:
+        "hardware": {
+            "input_mode": "mux_touch",
+            "mux": {
+                "analog_pin": "GP26",
+                "select_pins": ["GP10", "GP11", "GP12", "GP13"]
+            },
+            "pins": {
+                "GP0": {"note": "C4", "mux_channel": 0},
+                "GP1": {"note": "D4", "mux_channel": 1}
+            }
+        }
+    """
+
+    def __init__(self, pin_map, notes, mux_config):
+        import analogio
+
+        self.pads = []
+        by_name, by_idx, by_midi = build_note_lookup(notes)
+
+        # Set up mux analog input
+        adc_pin_name = mux_config.get("analog_pin", "GP26")
+        adc_pin = getattr(board, adc_pin_name, None)
+        if adc_pin is None:
+            print("ERROR: ADC pin {} not found".format(adc_pin_name))
+            return
+        self.adc = analogio.AnalogIn(adc_pin)
+
+        # Set up mux select pins as digital outputs
+        self.select_pins = []
+        for sp_name in mux_config.get("select_pins", []):
+            sp = getattr(board, sp_name, None)
+            if sp is None:
+                print("WARNING: Mux select pin {} not found".format(sp_name))
+                continue
+            dio = digitalio.DigitalInOut(sp)
+            dio.direction = digitalio.Direction.OUTPUT
+            dio.value = False
+            self.select_pins.append(dio)
+
+        self.num_select = len(self.select_pins)
+        print("Mux: {} on {}, {} select pins".format(
+            adc_pin_name, ", ".join(mux_config.get("select_pins", [])),
+            self.num_select))
+
+        # Set up per-pad digital trigger + mux channel
+        for pin_name, pad_cfg in pin_map.items():
+            # Support both dict and string pin configs
+            if isinstance(pad_cfg, str):
+                note_id = pad_cfg
+                mux_ch = None
+            else:
+                note_id = pad_cfg.get("note", "")
+                mux_ch = pad_cfg.get("mux_channel")
+
+            bp = getattr(board, pin_name, None)
+            if bp is None:
+                print("WARNING: Pin {} not found".format(pin_name))
+                continue
+
+            note_info = find_note(note_id, by_name, by_idx, by_midi)
+            if note_info is None:
+                print("WARNING: Note {} not in layout".format(note_id))
+                continue
+
+            try:
+                dio = digitalio.DigitalInOut(bp)
+                dio.direction = digitalio.Direction.INPUT
+                dio.pull = digitalio.Pull.UP
+                self.pads.append({
+                    "pin": dio,
+                    "note": note_info,
+                    "mux_channel": mux_ch,
+                    "was_pressed": False,
+                })
+            except Exception as e:
+                print("WARNING: {} init failed: {}".format(pin_name, e))
+
+    def _set_mux_channel(self, channel):
+        """Set mux select pins to address a channel (binary encoding)."""
+        for i in range(self.num_select):
+            self.select_pins[i].value = bool(channel & (1 << i))
+
+    def _read_velocity(self, channel):
+        """Read analog value from a mux channel and map to velocity 1-127."""
+        if channel is None or self.num_select == 0:
+            return 100  # default velocity if no mux channel assigned
+
+        self._set_mux_channel(channel)
+        # Small settle time for mux switching
+        time.sleep(0.001)
+        raw = self.adc.value  # 0-65535 (16-bit, 0-3.3V)
+
+        # Linear map: 0V -> velocity 1, 3.3V -> velocity 127
+        velocity = int((raw / 65535.0) * 126) + 1
+        return max(1, min(127, velocity))
+
+    def scan(self):
+        """Scan digital pins; read analog velocity for new presses.
+
+        Returns (pressed_notes, released_notes). Each pressed note dict
+        has a "velocity" key set from the analog reading.
+        """
+        pressed = []
+        released = []
+
+        for pad in self.pads:
+            is_pressed = not pad["pin"].value  # active low
+            if is_pressed and not pad["was_pressed"]:
+                vel = self._read_velocity(pad["mux_channel"])
+                # Attach velocity to a copy so we don't mutate the note dict
+                note_with_vel = dict(pad["note"])
+                note_with_vel["velocity"] = vel
+                pressed.append(note_with_vel)
+            elif not is_pressed and pad["was_pressed"]:
+                released.append(pad["note"])
+            pad["was_pressed"] = is_pressed
+
+        return pressed, released
+
+    @property
+    def count(self):
+        return len(self.pads)
+
+
 # ---------------------------------------------------------------------------
 # Demo / test modes
 # ---------------------------------------------------------------------------
@@ -515,7 +655,6 @@ def play_chord_demo(player, notes):
 def main():
     print("\n" + "=" * 40)
     print("  rpiPan - Steel Pan for Pico")
-    print("  Polyphonic WAV sample player")
     print("=" * 40)
 
     # Load layout and hardware config
@@ -579,15 +718,15 @@ def main():
         loaded = player.load_all(notes)
         if loaded == 0:
             print("No WAV files found in {}/".format(sounds_dir))
-            print("Falling back to PWM tone mode (monophonic)")
+            print("Falling back to PWM tone mode")
             player.deinit()
             player = None
     except ImportError as e:
         print("audiomixer not available: {}".format(e))
-        print("Falling back to PWM tone mode (monophonic)")
+        print("Falling back to PWM tone mode")
     except Exception as e:
         print("Audio init error: {}".format(e))
-        print("Falling back to PWM tone mode (monophonic)")
+        print("Falling back to PWM tone mode")
 
     if player is None:
         player = TonePlayer(audio_pin)
@@ -604,25 +743,19 @@ def main():
 
         play_demo(player, notes, tempo_bpm=100)
         time.sleep(0.5)
-
-        if isinstance(player, WavPlayer):
-            play_chord_demo(player, notes)
+        play_chord_demo(player, notes)
 
         if led:
             led.value = False
 
-        print("Demo finished. Add 'hardware' config to pan_layout.json:")
-        print('  "hardware": {')
-        print('    "audio_pin": "GP18",')
-        print('    "input_mode": "button",')
-        print('    "max_voices": 8,')
-        print('    "sample_rate": 22050,')
-        print('    "pins": {')
-        print('      "GP0": "C4",')
-        print('      "GP1": "D4",')
-        print('      "GP2": "E4"')
-        print("    }")
-        print("  }")
+        print("Demo finished. Add 'hardware' config to pan_layout.json.")
+        print("For button mode:")
+        print('  "input_mode": "button",')
+        print('  "pins": {"GP0": "C4", "GP1": "D4"}')
+        print("For mux_touch mode (velocity-sensitive):")
+        print('  "input_mode": "mux_touch",')
+        print('  "mux": {"analog_pin":"GP26", "select_pins":["GP10","GP11","GP12","GP13"]},')
+        print('  "pins": {"GP0": {"note":"C4","mux_channel":0}}')
 
         # Idle blink
         while True:
@@ -631,7 +764,10 @@ def main():
             time.sleep(1)
 
     # Set up inputs
-    if input_mode == "touch":
+    if input_mode == "mux_touch":
+        mux_config = hw_config.get("mux", {})
+        inputs = MuxTouchInput(pin_map, notes, mux_config)
+    elif input_mode == "touch":
         inputs = TouchInput(pin_map, notes)
     else:
         inputs = ButtonInput(pin_map, notes)
@@ -648,8 +784,9 @@ def main():
 
         for note in pressed:
             name = "{}{}".format(note["name"], note["octave"])
-            print("  ON:  {} ({:.0f} Hz)".format(name, note["freq"]))
-            player.note_on(note["midi"], velocity=100)
+            vel = note.get("velocity", 100)
+            print("  ON:  {} ({:.0f} Hz, vel={})".format(name, note["freq"], vel))
+            player.note_on(note["midi"], velocity=vel)
 
         for note in released:
             name = "{}{}".format(note["name"], note["octave"])
